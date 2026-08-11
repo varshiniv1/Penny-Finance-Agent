@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+from datetime import date as _Date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +22,14 @@ _DATE_PATTERNS = [
     r"\b(\d{4}-\d{2}-\d{2})\b",
     r"\b(\w{3}\.?\s+\d{1,2},?\s+\d{4})\b",
     r"\b(\d{1,2}-\w{3}-\d{2,4})\b",
+    r"\b(\d{1,2}/\d{1,2})\b",  # bare MM/DD (e.g. Chase) — year resolved from statement period
 ]
-_AMOUNT_RE = re.compile(r"-?\$?([\d,]+\.\d{2})")
+_AMOUNT_RE = re.compile(r"(-?\$?[\d,]+\.\d{2})")
 _ACCT_RE = re.compile(r"\b\d{4,}(\d{4})\b")
+_PERIOD_RE = re.compile(
+    r"([A-Za-z]+ \d{1,2},? \d{4})\s*through\s*([A-Za-z]+ \d{1,2},? \d{4})", re.IGNORECASE
+)
+_BARE_MD_RE = re.compile(r"^\d{1,2}/\d{1,2}$")
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
 
 
@@ -68,17 +74,19 @@ def _parse_pdf_bytes(data: bytes, source_file: str) -> list[dict[str, Any]]:
 
     rows: list[dict] = []
     with pdfplumber.open(io.BytesIO(data)) as pdf:
-        account_last4 = _extract_account_hint(pdf)
+        first_page_text = pdf.pages[0].extract_text() or ""
+        account_last4 = _extract_account_hint_from_text(first_page_text)
+        period = _extract_statement_period(first_page_text)
         for page_num, page in enumerate(pdf.pages, start=1):
             text = page.extract_text() or ""
             if len(text.strip()) < 50:
                 # Scanned page — fall back to OCR
                 text = _ocr_pdf_page_bytes(data, page_num - 1)
 
-            rows.extend(_parse_text(text, page_num, account_last4, source_file))
+            rows.extend(_parse_text(text, page_num, account_last4, source_file, period))
 
             for table in page.extract_tables() or []:
-                rows.extend(_parse_table(table, page_num, account_last4, source_file))
+                rows.extend(_parse_table(table, page_num, account_last4, source_file, period))
 
     return _dedup(rows)
 
@@ -167,25 +175,61 @@ def _map_csv_row(row: dict, source_file: str, page_num: int) -> dict | None:
 
 # ── Text parsing helpers ──────────────────────────────────────────────────────
 
-def _extract_account_hint(pdf) -> str:
-    text = pdf.pages[0].extract_text() or ""
+def _extract_account_hint_from_text(text: str) -> str:
     m = _ACCT_RE.search(text)
     return m.group(1) if m else ""
 
 
-def _parse_text(text: str, page_num: int, account_last4: str, source_file: str) -> list[dict]:
+def _extract_statement_period(text: str) -> tuple[_Date, _Date] | None:
+    """Find a 'Month DD, YYYY through Month DD, YYYY' statement period, if present."""
+    m = _PERIOD_RE.search(text)
+    if not m:
+        return None
+    try:
+        start = datetime.strptime(m.group(1).replace(",", ""), "%B %d %Y").date()
+        end = datetime.strptime(m.group(2).replace(",", ""), "%B %d %Y").date()
+        return start, end
+    except ValueError:
+        return None
+
+
+def _resolve_year(date_str: str, period: tuple[_Date, _Date] | None) -> str:
+    """Fill in the year for a bare MM/DD date using the statement period, if known."""
+    if not _BARE_MD_RE.match(date_str):
+        return date_str
+    month, day = (int(x) for x in date_str.split("/"))
+    if period is None:
+        year = _Date.today().year
+    else:
+        start, end = period
+        year = end.year
+        for candidate_year in {start.year, end.year}:
+            try:
+                candidate = _Date(candidate_year, month, day)
+            except ValueError:
+                continue
+            if start <= candidate <= end:
+                year = candidate_year
+                break
+    return f"{month}/{day}/{year}"
+
+
+def _parse_text(
+    text: str, page_num: int, account_last4: str, source_file: str,
+    period: tuple[_Date, _Date] | None = None,
+) -> list[dict]:
     rows = []
     for line in text.splitlines():
         line = line.strip()
         if len(line) < 8:
             continue
-        date = _extract_date(line)
+        raw_date = _extract_date(line)
         amount = _extract_amount(line)
-        if date and amount is not None:
-            desc = _clean_description(line, date, amount)
+        if raw_date and amount is not None:
+            desc = _clean_description(line, raw_date, amount)
             if desc:
                 rows.append({
-                    "date": date,
+                    "date": _resolve_year(raw_date, period),
                     "description": desc,
                     "amount": amount,
                     "account_last4": account_last4,
@@ -195,19 +239,22 @@ def _parse_text(text: str, page_num: int, account_last4: str, source_file: str) 
     return rows
 
 
-def _parse_table(table: list[list], page_num: int, account_last4: str, source_file: str) -> list[dict]:
+def _parse_table(
+    table: list[list], page_num: int, account_last4: str, source_file: str,
+    period: tuple[_Date, _Date] | None = None,
+) -> list[dict]:
     if not table or len(table) < 2:
         return []
     rows = []
     for row in table[1:]:
         cells = [str(c or "").strip() for c in row]
         line = "  ".join(cells)
-        date = _extract_date(line)
+        raw_date = _extract_date(line)
         amount = _extract_amount(line)
-        if date and amount is not None:
-            desc = _clean_description(line, date, amount)
+        if raw_date and amount is not None:
+            desc = _clean_description(line, raw_date, amount)
             rows.append({
-                "date": date,
+                "date": _resolve_year(raw_date, period),
                 "description": desc,
                 "amount": amount,
                 "account_last4": account_last4,
@@ -229,8 +276,12 @@ def _extract_amount(text: str) -> float | None:
     hits = _AMOUNT_RE.findall(text)
     if not hits:
         return None
+    # Lines with a running-balance column look like "... AMOUNT BALANCE" — the
+    # transaction amount is second-to-last, the balance is last. With only one
+    # number on the line, there's no balance column and it must be the amount.
+    raw = hits[-2] if len(hits) >= 2 else hits[-1]
     try:
-        val = float(hits[-1].replace(",", ""))
+        val = float(raw.replace(",", "").replace("$", ""))
         if re.search(r"\b(CR|credit|refund)\b", text, re.IGNORECASE):
             val = -abs(val)
         return val

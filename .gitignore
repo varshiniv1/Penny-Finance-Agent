@@ -1,0 +1,13 @@
+.env
+*.duckdb
+*.db
+data/statements/
+data/charts/
+data/fixture/*.parquet
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+*.egg-info/
+.pytest_cache/

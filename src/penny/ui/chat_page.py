@@ -1,0 +1,87 @@
+"""Streamlit page: chat with Penny agent."""
+from __future__ import annotations
+
+import json
+
+import plotly.io as pio
+import streamlit as st
+
+from penny.agent.loop import run_turn
+from penny.ui.session import get_ledger, get_fts, get_history, tx_count
+
+
+def show() -> None:
+    st.header("Chat with Penny")
+
+    if tx_count() == 0:
+        st.warning("No transactions loaded yet. Go to **Upload Statements** first.")
+        return
+
+    api_key = st.session_state.get("api_key", "")
+    if not api_key:
+        st.error("Add your Anthropic API key in the sidebar to use the chat.")
+        return
+
+    st.caption(f"{tx_count()} transactions in session.")
+
+    # Render conversation history
+    history = get_history()
+    for msg in st.session_state.get("display_messages", []):
+        with st.chat_message(msg["role"]):
+            if msg["type"] == "text":
+                st.markdown(msg["content"])
+            elif msg["type"] == "sql":
+                st.code(msg["content"], language="sql")
+            elif msg["type"] == "chart":
+                fig = pio.from_json(msg["content"])
+                st.plotly_chart(fig, use_container_width=True)
+
+    # Input
+    user_input = st.chat_input("Ask about your spending…")
+    if not user_input:
+        return
+
+    if "display_messages" not in st.session_state:
+        st.session_state["display_messages"] = []
+
+    st.session_state["display_messages"].append(
+        {"role": "user", "type": "text", "content": user_input}
+    )
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    ledger = get_ledger()
+    fts = get_fts()
+
+    with st.chat_message("assistant"):
+        text_placeholder = st.empty()
+        accumulated_text = ""
+
+        for event in run_turn(user_input, history, ledger, fts, api_key):
+            if event["type"] == "text":
+                accumulated_text += event["text"]
+                text_placeholder.markdown(accumulated_text + "▌")
+
+            elif event["type"] == "sql":
+                text_placeholder.markdown(accumulated_text)
+                st.code(event["sql"], language="sql")
+                st.session_state["display_messages"].append(
+                    {"role": "assistant", "type": "sql", "content": event["sql"]}
+                )
+
+            elif event["type"] == "chart":
+                fig = pio.from_json(event["chart_json"])
+                st.plotly_chart(fig, use_container_width=True)
+                st.session_state["display_messages"].append(
+                    {"role": "assistant", "type": "chart", "content": event["chart_json"]}
+                )
+
+            elif event["type"] == "done":
+                text_placeholder.markdown(accumulated_text)
+                if accumulated_text:
+                    st.session_state["display_messages"].append(
+                        {"role": "assistant", "type": "text", "content": accumulated_text}
+                    )
+
+    # Keep history for next turn (already updated by run_turn)
+    st.session_state["history"] = history

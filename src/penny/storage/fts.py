@@ -20,7 +20,7 @@ class FTSIndex:
     def __init__(self, path: str | Path = ":memory:"):
         if str(path) != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._con = sqlite3.connect(str(path))
+        self._con = sqlite3.connect(str(path), check_same_thread=False)
         self._con.row_factory = sqlite3.Row
         self._con.execute(_DDL)
         self._con.commit()

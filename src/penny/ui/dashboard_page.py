@@ -13,6 +13,20 @@ from penny.charts.templates import (
 from penny.ui.session import get_ledger, tx_count
 
 
+def _render(compute, empty_message: str) -> None:
+    """Run a chart-building callable, showing an info message instead of a raw
+    error when the underlying query has no rows yet (e.g. nothing categorized)."""
+    try:
+        fig = compute()
+    except Exception as e:
+        st.error(f"Chart error: {e}")
+        return
+    if fig is None:
+        st.info(empty_message)
+    else:
+        st.plotly_chart(fig, use_container_width=True)
+
+
 def show() -> None:
     st.header("Dashboard")
 
@@ -43,35 +57,25 @@ def show() -> None:
     # ── Charts ────────────────────────────────────────────────────────────────
     col_left, col_right = st.columns(2)
 
+    no_categories_msg = (
+        "No categorized spending yet — add your Anthropic API key and "
+        "reprocess statements to enable merchant categorization."
+    )
+
     with col_left:
-        try:
-            st.plotly_chart(spending_by_category(ledger), use_container_width=True)
-        except Exception as e:
-            st.error(f"Chart error: {e}")
+        _render(lambda: spending_by_category(ledger), no_categories_msg)
 
     with col_right:
-        try:
-            st.plotly_chart(category_pie(ledger), use_container_width=True)
-        except Exception as e:
-            st.error(f"Chart error: {e}")
+        _render(lambda: category_pie(ledger), no_categories_msg)
 
-    try:
-        st.plotly_chart(monthly_trend(ledger), use_container_width=True)
-    except Exception as e:
-        st.error(f"Chart error: {e}")
+    _render(lambda: monthly_trend(ledger), "No spending data yet.")
 
     col_left2, col_right2 = st.columns(2)
     with col_left2:
-        try:
-            st.plotly_chart(top_merchants(ledger), use_container_width=True)
-        except Exception as e:
-            st.error(f"Chart error: {e}")
+        _render(lambda: top_merchants(ledger), "No spending data yet.")
 
     with col_right2:
-        try:
-            st.plotly_chart(recurring_charges(ledger), use_container_width=True)
-        except Exception as e:
-            st.error(f"Chart error: {e}")
+        _render(lambda: recurring_charges(ledger), "No recurring charges detected yet.")
 
     # ── Raw transactions table ─────────────────────────────────────────────────
     with st.expander("Browse all transactions"):

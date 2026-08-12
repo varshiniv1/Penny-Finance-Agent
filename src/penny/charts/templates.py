@@ -26,7 +26,10 @@ def render_chart(
     y_col: str | None = None,
     label_col: str | None = None,
     value_col: str | None = None,
-) -> go.Figure:
+) -> go.Figure | None:
+    if not rows:
+        return None
+
     df = pd.DataFrame(rows)
 
     if chart_type == "bar":
@@ -71,7 +74,7 @@ def render_chart(
 
 # ── Pre-built dashboard charts ────────────────────────────────────────────────
 
-def spending_by_category(ledger) -> go.Figure:
+def spending_by_category(ledger) -> go.Figure | None:
     rows = ledger.query(
         "SELECT category, SUM(amount) AS total FROM transactions "
         "WHERE is_internal = false AND amount > 0 AND category IS NOT NULL AND category != '' "
@@ -80,7 +83,7 @@ def spending_by_category(ledger) -> go.Figure:
     return render_chart("bar", rows, "Spending by Category", "category", "total")
 
 
-def monthly_trend(ledger) -> go.Figure:
+def monthly_trend(ledger) -> go.Figure | None:
     rows = ledger.query(
         "SELECT strftime(date, '%Y-%m') AS month, SUM(amount) AS total "
         "FROM transactions WHERE is_internal = false AND amount > 0 "
@@ -89,7 +92,7 @@ def monthly_trend(ledger) -> go.Figure:
     return render_chart("line", rows, "Monthly Spending Trend", "month", "total")
 
 
-def top_merchants(ledger, n: int = 10) -> go.Figure:
+def top_merchants(ledger, n: int = 10) -> go.Figure | None:
     rows = ledger.query(
         f"SELECT COALESCE(merchant, description) AS name, SUM(amount) AS total "
         f"FROM transactions WHERE is_internal = false AND amount > 0 "
@@ -98,7 +101,7 @@ def top_merchants(ledger, n: int = 10) -> go.Figure:
     return render_chart("bar", rows, f"Top {n} Merchants", "name", "total")
 
 
-def category_pie(ledger) -> go.Figure:
+def category_pie(ledger) -> go.Figure | None:
     rows = ledger.query(
         "SELECT category, SUM(amount) AS total FROM transactions "
         "WHERE is_internal = false AND amount > 0 AND category IS NOT NULL AND category != '' "
@@ -107,7 +110,7 @@ def category_pie(ledger) -> go.Figure:
     return render_chart("pie", rows, "Spending Breakdown", "category", "total")
 
 
-def recurring_charges(ledger) -> go.Figure:
+def recurring_charges(ledger) -> go.Figure | None:
     rows = ledger.query(
         """
         SELECT COALESCE(merchant, description) AS name,

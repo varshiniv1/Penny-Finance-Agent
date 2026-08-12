@@ -48,11 +48,14 @@ def show() -> None:
 
         if api_key:
             progress.progress(1.0, text="Enriching merchants…")
-            stats = enrich_batch(ledger, api_key)
-            st.info(
-                f"Merchant enrichment: {stats['rules']} matched by rules, "
-                f"{stats['web']} via web search, {stats['ambiguous']} ambiguous."
-            )
+            try:
+                stats = enrich_batch(ledger, api_key)
+                st.info(
+                    f"Merchant enrichment: {stats['rules']} matched by rules, "
+                    f"{stats['web']} via web search, {stats['ambiguous']} ambiguous."
+                )
+            except Exception as e:
+                st.error(f"Merchant enrichment failed: {e}")
         else:
             st.info("Add your Anthropic API key in the sidebar to enable merchant enrichment.")
 

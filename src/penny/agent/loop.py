@@ -13,6 +13,31 @@ if TYPE_CHECKING:
     from penny.storage.ledger import Ledger
     from penny.storage.fts import FTSIndex
 
+# Static across every request — cache it. The breakpoint here also covers
+# TOOL_SCHEMAS, since the API renders tools -> system -> messages and a
+# breakpoint caches everything rendered before it.
+_CACHED_SYSTEM = [
+    {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
+]
+
+
+def _with_cache_breakpoint(messages: list[dict]) -> list[dict]:
+    """Copy of `messages` with a cache breakpoint on the last content block.
+
+    Placed fresh on every call rather than persisted into `history`, so the
+    marker always sits on the current last block instead of accumulating on
+    old ones (max 4 breakpoints per request).
+    """
+    if not messages:
+        return messages
+    *rest, last = messages
+    content = last["content"]
+    content = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+    if not content:
+        return messages
+    content[-1] = {**content[-1], "cache_control": {"type": "ephemeral"}}
+    return [*rest, {**last, "content": content}]
+
 
 def run_turn(
     user_message: str,
@@ -44,9 +69,9 @@ def run_turn(
         response = client.messages.create(
             model=model,
             max_tokens=4096,
-            system=SYSTEM_PROMPT,
+            system=_CACHED_SYSTEM,
             tools=TOOL_SCHEMAS,
-            messages=messages,
+            messages=_with_cache_breakpoint(messages),
         )
 
         # A single response can contain text AND multiple tool_use blocks —

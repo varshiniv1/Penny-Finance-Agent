@@ -3,6 +3,8 @@
 Entry point for Streamlit Community Cloud.
 Run locally:  streamlit run streamlit_app.py
 """
+import hmac
+import os
 import sys
 from pathlib import Path
 
@@ -10,6 +12,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 import streamlit as st
+
+
+def _is_admin() -> bool:
+    """Observability is owner-only: visible only with ?admin=<PENNY_ADMIN_TOKEN>
+    matching a secret configured out-of-band (Streamlit secrets or an env var),
+    never checked into the repo. No secret configured -> tab never appears."""
+    try:
+        secret = st.secrets.get("PENNY_ADMIN_TOKEN", "")
+    except Exception:
+        secret = ""
+    secret = secret or os.environ.get("PENNY_ADMIN_TOKEN", "")
+    if not secret:
+        return False
+    given = st.query_params.get("admin", "")
+    return hmac.compare_digest(given, secret)
 
 st.set_page_config(
     page_title="Penny — Personal Finance Agent",
@@ -40,9 +57,13 @@ with st.sidebar:
 
     st.divider()
 
+    nav_options = ["Upload Statements", "Chat with Penny", "Dashboard"]
+    if _is_admin():
+        nav_options.append("Observability")
+
     page = st.radio(
         "Navigate",
-        ["Upload Statements", "Chat with Penny", "Dashboard", "Observability"],
+        nav_options,
         label_visibility="collapsed",
     )
 

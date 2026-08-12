@@ -1,6 +1,8 @@
 """Streamlit page: a single chat surface — attach statements and ask questions in one thread."""
 from __future__ import annotations
 
+import re
+
 import plotly.io as pio
 import streamlit as st
 
@@ -20,6 +22,17 @@ _MAX_FILE_MB = 20
 # hold raw image/chart/file bytes per turn, which would otherwise grow
 # unbounded over a long session.
 _MAX_DISPLAY_MESSAGES = 200
+
+
+_DOLLAR_RE = re.compile(r"(?<!\\)\$")
+
+
+def _escape_markdown_math(text: str) -> str:
+    """st.markdown renders paired `$...$` as inline LaTeX/KaTeX math — a
+    sentence with two dollar amounts like "$11,411.67 ... $718,000" gets torn
+    apart and rendered as a math expression instead of plain text. Escaping
+    literal `$` keeps dollar amounts in Claude's replies as plain text."""
+    return _DOLLAR_RE.sub(lambda m: "\\$", text)
 
 
 def _append(role: str, type_: str, **fields) -> None:
@@ -108,6 +121,7 @@ def _process_uploads(files: list, api_key: str) -> None:
         elif not api_key:
             summary += "\n\nAdd your Anthropic API key in the sidebar to enable categorization and chat."
 
+        summary = _escape_markdown_math(summary)
         st.markdown(summary)
         _append("assistant", "text", content=summary)
 
@@ -149,6 +163,7 @@ def show() -> None:
         if files:
             attachment_line = "📎 " + ", ".join(f.name for f in files)
             label = f"{attachment_line}\n\n{text}" if text else attachment_line
+        label = _escape_markdown_math(label)
         _append("user", "text", content=label)
         with st.chat_message("user"):
             st.markdown(label)
@@ -204,7 +219,7 @@ def show() -> None:
                     log_usage(event["source"], event["model"], event["usage"])
 
                 elif event["type"] == "text":
-                    accumulated_text += event["text"]
+                    accumulated_text += _escape_markdown_math(event["text"])
                     text_placeholder.markdown(accumulated_text + "▌")
                     got_output = True
 

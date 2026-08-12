@@ -59,8 +59,6 @@ def _append(role: str, type_: str, **fields) -> None:
 def _render_message(msg: dict, key: str) -> None:
     if msg["type"] == "text":
         st.markdown(msg["content"])
-    elif msg["type"] == "sql":
-        st.code(msg["content"], language="sql")
     elif msg["type"] == "chart":
         st.plotly_chart(pio.from_json(msg["content"]), use_container_width=True)
     elif msg["type"] == "image":
@@ -212,7 +210,7 @@ def show() -> None:
         def _flush_text() -> None:
             # Persist and lock in the current text segment, then start a
             # fresh placeholder so the next segment renders below whatever
-            # comes next (SQL/chart), instead of overwriting this one.
+            # comes next (chart/image/file), instead of overwriting this one.
             nonlocal text_placeholder, accumulated_text
             if accumulated_text:
                 normalized = _normalize_markdown(accumulated_text)
@@ -236,12 +234,6 @@ def show() -> None:
                 elif event["type"] == "text":
                     accumulated_text += event["text"]
                     text_placeholder.markdown(_normalize_markdown(accumulated_text) + "▌")
-                    got_output = True
-
-                elif event["type"] == "sql":
-                    _flush_text()
-                    st.code(event["sql"], language="sql")
-                    _append("assistant", "sql", content=event["sql"])
                     got_output = True
 
                 elif event["type"] == "chart":

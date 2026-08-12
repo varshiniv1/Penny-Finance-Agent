@@ -35,7 +35,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from penny.ui import upload_page, chat_page, dashboard_page, observability_page
+from penny.ui import chat_page, observability_page
+from penny.ui.session import get_ledger, tx_count
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -57,15 +58,36 @@ with st.sidebar:
 
     st.divider()
 
-    nav_options = ["Upload Statements", "Chat with Penny", "Dashboard"]
-    if _is_admin():
-        nav_options.append("Observability")
+    with st.expander("💾 Session data"):
+        st.caption("Your data lives only in this browser session. Export it to restore later.")
+        if tx_count() > 0:
+            if st.button("Export transactions (Parquet)"):
+                import tempfile, pathlib
+                with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+                    tmp_path = pathlib.Path(tmp.name)
+                get_ledger().export_parquet(tmp_path)
+                st.download_button(
+                    "Download penny_data.parquet",
+                    data=tmp_path.read_bytes(),
+                    file_name="penny_data.parquet",
+                    mime="application/octet-stream",
+                )
+        restore = st.file_uploader("Restore from Parquet backup", type=["parquet"], key="restore")
+        if restore and st.button("Restore"):
+            import tempfile, pathlib
+            with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+                tmp.write(restore.read())
+                tmp_path = pathlib.Path(tmp.name)
+            n = get_ledger().import_parquet(tmp_path)
+            st.success(f"Restored. Total transactions: {n}")
 
-    page = st.radio(
-        "Navigate",
-        nav_options,
-        label_visibility="collapsed",
-    )
+    if _is_admin():
+        st.divider()
+        page = st.radio(
+            "Navigate", ["Chat with Penny", "Observability"], label_visibility="collapsed"
+        )
+    else:
+        page = "Chat with Penny"
 
     st.divider()
     st.caption(
@@ -75,11 +97,7 @@ with st.sidebar:
     )
 
 # ── Page routing ──────────────────────────────────────────────────────────────
-if page == "Upload Statements":
-    upload_page.show()
-elif page == "Chat with Penny":
-    chat_page.show()
-elif page == "Dashboard":
-    dashboard_page.show()
-elif page == "Observability":
+if page == "Observability":
     observability_page.show()
+else:
+    chat_page.show()

@@ -6,10 +6,24 @@ Supports two modes:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 import duckdb
+
+# query() is exposed to the LLM (query_sql / generate_chart tools) and to any
+# MCP client — it must never be able to read/write outside the transactions
+# table it's handed. Block multi-statement injection and anything beyond a
+# plain read: DDL/DML, DuckDB's file/network-reading table functions, and
+# extension loading (which could otherwise smuggle in httpfs to exfiltrate
+# data or read arbitrary local files via read_csv_auto/read_parquet/glob).
+_SQL_DISALLOWED_RE = re.compile(
+    r"\b(attach|detach|copy|pragma|install|load|call|export|import|create|drop|alter|"
+    r"delete|update|insert|read_csv|read_csv_auto|read_parquet|read_json|read_json_auto|"
+    r"read_ndjson|glob|httpfs)\b",
+    re.IGNORECASE,
+)
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS transactions (
@@ -40,6 +54,13 @@ CREATE TABLE IF NOT EXISTS query_cache (
     last_used     TIMESTAMP DEFAULT current_timestamp
 );
 """
+
+
+def _escape_sql_literal(path: Path) -> str:
+    """Escape a path for embedding in a single-quoted SQL string literal.
+    These paths are always our own tempfiles, never user-controlled, but this
+    keeps the query from breaking (or worse) if one ever contains a quote."""
+    return str(path).replace("'", "''")
 
 
 class Ledger:
@@ -78,8 +99,20 @@ class Ledger:
         return len(rows)
 
     def query(self, sql: str, limit: int = 1000) -> list[dict[str, Any]]:
-        """Execute a read-only SQL query, capped at `limit` rows."""
-        wrapped = f"SELECT * FROM ({sql}) __q LIMIT {limit}"
+        """Execute a read-only SELECT query, capped at `limit` rows.
+
+        Raises ValueError if `sql` isn't a single plain SELECT/WITH statement,
+        or references a disallowed keyword/function — see _SQL_DISALLOWED_RE.
+        """
+        stripped = sql.strip().rstrip(";")
+        if ";" in stripped:
+            raise ValueError("Multiple statements are not allowed.")
+        if not re.match(r"^\s*(select|with)\b", stripped, re.IGNORECASE):
+            raise ValueError("Only SELECT queries are allowed.")
+        if _SQL_DISALLOWED_RE.search(stripped):
+            raise ValueError("Query contains a disallowed keyword or function.")
+
+        wrapped = f"SELECT * FROM ({stripped}) __q LIMIT {limit}"
         rel = self._con.execute(wrapped)
         cols = [d[0] for d in rel.description]
         return [dict(zip(cols, row)) for row in rel.fetchall()]
@@ -139,11 +172,11 @@ class Ledger:
 
     def export_parquet(self, path: Path) -> None:
         """Dump transactions to Parquet so users can download and re-upload."""
-        self._con.execute(f"COPY transactions TO '{path}' (FORMAT PARQUET)")
+        self._con.execute(f"COPY transactions TO '{_escape_sql_literal(path)}' (FORMAT PARQUET)")
 
     def import_parquet(self, path: Path) -> int:
         self._con.execute(
-            f"INSERT OR REPLACE INTO transactions SELECT * FROM read_parquet('{path}')"
+            f"INSERT OR REPLACE INTO transactions SELECT * FROM read_parquet('{_escape_sql_literal(path)}')"
         )
         return self.count()
 

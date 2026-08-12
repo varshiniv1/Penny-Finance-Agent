@@ -87,25 +87,46 @@ def enrich_batch(ledger: "Ledger", api_key: str, max_batch: int = 50) -> dict:
 
     ledger.upsert_merchants(rule_entries)
 
-    web_entries, ambiguous, usage = [], [], None
-    batch = remaining[:max_batch]
-    if batch:
+    web_entries, ambiguous = [], []
+    total_usage = None
+    if remaining:
         client = anthropic.Anthropic(api_key=api_key)
-        results, usage = _batch_lookup(client, batch)
-        for d in batch:
-            result = results.get(d)
-            if result:
-                web_entries.append({"descriptor": d, **result})
-            else:
-                ambiguous.append(d)
+        for start in range(0, len(remaining), max_batch):
+            batch = remaining[start : start + max_batch]
+            results, usage = _batch_lookup(client, batch)
+            if usage is not None:
+                total_usage = _add_usage(total_usage, usage)
+            for d in batch:
+                result = results.get(d)
+                if result:
+                    web_entries.append({"descriptor": d, **result})
+                else:
+                    ambiguous.append(d)
 
     ledger.upsert_merchants(web_entries)
     ledger.apply_merchant_names()
 
     return {
         "rules": len(rule_entries), "web": len(web_entries), "ambiguous": len(ambiguous),
-        "usage": usage,
+        "usage": total_usage,
     }
+
+
+def _add_usage(total, usage):
+    """Accumulate token usage across multiple chunked batch calls into one
+    object Observability logging can read the same way as a single-call Usage."""
+    from types import SimpleNamespace
+
+    if total is None:
+        total = SimpleNamespace(
+            input_tokens=0, output_tokens=0,
+            cache_creation_input_tokens=0, cache_read_input_tokens=0,
+        )
+    total.input_tokens += usage.input_tokens
+    total.output_tokens += usage.output_tokens
+    total.cache_creation_input_tokens += getattr(usage, "cache_creation_input_tokens", None) or 0
+    total.cache_read_input_tokens += getattr(usage, "cache_read_input_tokens", None) or 0
+    return total
 
 
 _CATEGORIES = (

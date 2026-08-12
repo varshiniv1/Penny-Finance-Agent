@@ -11,6 +11,7 @@ Detection: if pdfplumber extracts < 50 chars on a page, fall back to OCR.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import re
 from datetime import date as _Date, datetime
@@ -31,6 +32,26 @@ _PERIOD_RE = re.compile(
 )
 _BARE_MD_RE = re.compile(r"^\d{1,2}/\d{1,2}$")
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
+_CREDIT_RE = re.compile(r"\b(CR|credit|refund)\b", re.IGNORECASE)
+
+# Credit-card statements print purchases as plain positive amounts and
+# payments/credits as negative (or CR-marked) — the opposite convention from
+# a bank/checking register, where withdrawals print negative and deposits
+# print positive. Requiring 2+ distinct CC-specific markers on the first page
+# keeps this from misfiring on an ordinary bank statement that just happens
+# to mention "payment" once.
+_CC_MARKERS_RE = re.compile(
+    r"\b(minimum payment due|credit limit|new balance|previous balance|"
+    r"payment due date|available credit)\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_statement_type(first_page_text: str) -> str:
+    """Return 'credit_card' if the statement clearly reads as a card statement,
+    else 'bank' (the default, existing sign convention)."""
+    hits = set(m.lower() for m in _CC_MARKERS_RE.findall(first_page_text))
+    return "credit_card" if len(hits) >= 2 else "bank"
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -38,28 +59,28 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
 def parse_file(path: Path | str) -> list[dict[str, Any]]:
     """Dispatch to the right parser based on file extension."""
     p = Path(path)
-    ext = p.suffix.lower()
-    if ext == ".pdf":
-        return parse_pdf(p)
-    elif ext == ".csv":
-        return parse_csv(p)
-    elif ext in _IMAGE_EXTS:
-        return parse_image(p)
-    else:
-        raise ValueError(f"Unsupported file type: {ext}")
+    return parse_file_bytes(p.read_bytes(), str(p))
 
 
 def parse_file_bytes(data: bytes, filename: str) -> list[dict[str, Any]]:
     """Parse from in-memory bytes (for Streamlit uploads)."""
     ext = Path(filename).suffix.lower()
     if ext == ".pdf":
-        return _parse_pdf_bytes(data, filename)
+        rows = _parse_pdf_bytes(data, filename)
     elif ext == ".csv":
-        return _parse_csv_bytes(data, filename)
+        rows = _parse_csv_bytes(data, filename)
     elif ext in _IMAGE_EXTS:
-        return _parse_image_bytes(data, filename)
+        rows = _parse_image_bytes(data, filename)
     else:
         raise ValueError(f"Unsupported file type: {ext}")
+
+    # A content hash (not the filename) is what makes the same statement
+    # re-uploaded under a different name (browser auto-rename, re-export)
+    # dedup correctly downstream instead of double-counting — see extractor.py.
+    content_hash = hashlib.sha1(data).hexdigest()[:16]
+    for r in rows:
+        r["content_hash"] = content_hash
+    return rows
 
 
 # ── PDF ───────────────────────────────────────────────────────────────────────
@@ -73,36 +94,52 @@ def _parse_pdf_bytes(data: bytes, source_file: str) -> list[dict[str, Any]]:
     import pdfplumber
 
     rows: list[dict] = []
+    ocr_images = None  # lazily rasterized once, only if a scanned page is hit
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         first_page_text = pdf.pages[0].extract_text() or ""
         account_last4 = _extract_account_hint_from_text(first_page_text)
         period = _extract_statement_period(first_page_text)
+        statement_type = _detect_statement_type(first_page_text)
         for page_num, page in enumerate(pdf.pages, start=1):
             text = page.extract_text() or ""
             if len(text.strip()) < 50:
-                # Scanned page — fall back to OCR
-                text = _ocr_pdf_page_bytes(data, page_num - 1)
+                # Scanned page — fall back to OCR. Rasterize the whole document
+                # once on first use rather than per page (pdf2image re-parses
+                # the full PDF bytes on every call otherwise).
+                if ocr_images is None:
+                    ocr_images = _rasterize_pdf(data)
+                text = _ocr_page(ocr_images, page_num - 1)
 
-            rows.extend(_parse_text(text, page_num, account_last4, source_file, period))
+            rows.extend(
+                _parse_text(text, page_num, account_last4, source_file, period, statement_type)
+            )
 
             for table in page.extract_tables() or []:
-                rows.extend(_parse_table(table, page_num, account_last4, source_file, period))
+                rows.extend(
+                    _parse_table(table, page_num, account_last4, source_file, period, statement_type)
+                )
 
     return _dedup(rows)
 
 
-def _ocr_pdf_page_bytes(pdf_bytes: bytes, page_index: int) -> str:
-    """Convert a single PDF page to text via OCR."""
+def _rasterize_pdf(pdf_bytes: bytes) -> list:
+    """Convert every page of the PDF to an image, once."""
     try:
         from pdf2image import convert_from_bytes
+    except ImportError:
+        raise ImportError("Install pdf2image and pytesseract for scanned PDF support.")
+    return convert_from_bytes(pdf_bytes, dpi=200)
+
+
+def _ocr_page(images: list, page_index: int) -> str:
+    """OCR a single already-rasterized page."""
+    try:
         import pytesseract
     except ImportError:
         raise ImportError("Install pdf2image and pytesseract for scanned PDF support.")
-
-    images = convert_from_bytes(pdf_bytes, first_page=page_index + 1, last_page=page_index + 1, dpi=200)
-    if not images:
+    if page_index >= len(images):
         return ""
-    return pytesseract.image_to_string(images[0])
+    return pytesseract.image_to_string(images[page_index])
 
 
 # ── Image ─────────────────────────────────────────────────────────────────────
@@ -156,8 +193,11 @@ def _map_csv_row(row: dict, source_file: str, page_num: int) -> dict | None:
     except ValueError:
         return None
     if credit_str:
+        # A value in a dedicated Credit column is unambiguous — money in —
+        # regardless of how it's signed in the source file; this app's
+        # convention is negative = credit/refund/income (see _extract_amount).
         try:
-            amount = float(credit_str.replace(",", "").replace("$", ""))
+            amount = -abs(float(credit_str.replace(",", "").replace("$", "")))
         except ValueError:
             pass
 
@@ -216,7 +256,7 @@ def _resolve_year(date_str: str, period: tuple[_Date, _Date] | None) -> str:
 
 def _parse_text(
     text: str, page_num: int, account_last4: str, source_file: str,
-    period: tuple[_Date, _Date] | None = None,
+    period: tuple[_Date, _Date] | None = None, statement_type: str = "bank",
 ) -> list[dict]:
     rows = []
     for line in text.splitlines():
@@ -224,7 +264,7 @@ def _parse_text(
         if len(line) < 8:
             continue
         raw_date = _extract_date(line)
-        amount = _extract_amount(line)
+        amount = _extract_amount(line, statement_type)
         if raw_date and amount is not None:
             desc = _clean_description(line, raw_date, amount)
             if desc:
@@ -241,7 +281,7 @@ def _parse_text(
 
 def _parse_table(
     table: list[list], page_num: int, account_last4: str, source_file: str,
-    period: tuple[_Date, _Date] | None = None,
+    period: tuple[_Date, _Date] | None = None, statement_type: str = "bank",
 ) -> list[dict]:
     if not table or len(table) < 2:
         return []
@@ -250,7 +290,7 @@ def _parse_table(
         cells = [str(c or "").strip() for c in row]
         line = "  ".join(cells)
         raw_date = _extract_date(line)
-        amount = _extract_amount(line)
+        amount = _extract_amount(line, statement_type)
         if raw_date and amount is not None:
             desc = _clean_description(line, raw_date, amount)
             rows.append({
@@ -272,7 +312,7 @@ def _extract_date(text: str) -> str | None:
     return None
 
 
-def _extract_amount(text: str) -> float | None:
+def _extract_amount(text: str, statement_type: str = "bank") -> float | None:
     hits = _AMOUNT_RE.findall(text)
     if not hits:
         return None
@@ -281,12 +321,20 @@ def _extract_amount(text: str) -> float | None:
     # number on the line, there's no balance column and it must be the amount.
     raw = hits[-2] if len(hits) >= 2 else hits[-1]
     try:
-        # Statements print debits as negative and credits unsigned (or vice
-        # versa) — flip to this app's convention: positive = expense/debit,
-        # negative = credit/refund (see Transaction schema in agent/prompts.py).
-        val = -float(raw.replace(",", "").replace("$", ""))
-        if re.search(r"\b(CR|credit|refund)\b", text, re.IGNORECASE):
-            val = -abs(val)
+        parsed = float(raw.replace(",", "").replace("$", ""))
+        is_credit = bool(_CREDIT_RE.search(text))
+        if statement_type == "credit_card":
+            # Purchases print as plain positive (expense, stays positive);
+            # payments/credits print negative or carry a credit marker.
+            val = -abs(parsed) if is_credit else parsed
+        else:
+            # Bank/checking register: withdrawals print negative and deposits
+            # print positive — flip to this app's convention: positive =
+            # expense/debit, negative = credit/refund/income (see Transaction
+            # schema in agent/prompts.py).
+            val = -parsed
+            if is_credit:
+                val = -abs(val)
         return val
     except ValueError:
         return None
@@ -301,10 +349,15 @@ def _clean_description(line: str, date: str, amount: float) -> str:
 
 
 def _dedup(rows: list[dict]) -> list[dict]:
+    """Collapse rows that text- and table-extraction both picked up from the
+    same page. Keying on page_num (not just date/description/amount) means two
+    genuinely distinct same-day, same-amount transactions on different pages
+    both survive — though two such transactions on the very same page are
+    still indistinguishable from a duplicate and will collapse to one."""
     seen: set[tuple] = set()
     out = []
     for r in rows:
-        key = (r["date"], r["description"][:30], r["amount"])
+        key = (r["date"], r["description"][:30], r["amount"], r.get("page_num"))
         if key not in seen:
             seen.add(key)
             out.append(r)

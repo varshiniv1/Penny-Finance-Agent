@@ -50,6 +50,13 @@ def get_usage_log() -> list[dict]:
     return st.session_state.get("usage_log", [])
 
 
+def reset_session() -> None:
+    """Clear the conversation, ledger, and search index — start over without
+    a full browser refresh (which would also lose the API key entry)."""
+    for key in ("ledger", "fts", "history", "display_messages"):
+        st.session_state.pop(key, None)
+
+
 def friendly_api_error(e: Exception) -> str:
     """Turn a raised Anthropic SDK exception into a message safe to show users."""
     import anthropic

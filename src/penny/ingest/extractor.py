@@ -56,7 +56,13 @@ def extract(raw: dict) -> Transaction | None:
     source_file = str(raw.get("source_file", ""))
     page_num = int(raw.get("page_num", 0))
 
-    tx_id = _make_id(date_str, description, amount, source_file, page_num)
+    # Hash the file's *content*, not its name, so re-uploading the same
+    # statement under a renamed file (browser auto-rename, re-export) is
+    # recognized as the same document and dedups instead of double-counting.
+    # Falls back to source_file for callers that don't provide a content hash
+    # (e.g. hand-built fixture rows).
+    doc_id = str(raw.get("content_hash") or source_file)
+    tx_id = _make_id(date_str, description, amount, doc_id, page_num)
 
     is_refund = amount < 0 or bool(
         re.search(r"\b(refund|credit|return|reversal)\b", description, re.IGNORECASE)
@@ -88,6 +94,6 @@ def _mask_account_numbers(text: str) -> str:
     return _ACCT_NUM_RE.sub(lambda m: "****" + m.group()[-4:], text)
 
 
-def _make_id(date_str: str, description: str, amount: float, source_file: str, page_num: int) -> str:
-    raw = f"{date_str}|{description}|{amount:.2f}|{source_file}|{page_num}"
+def _make_id(date_str: str, description: str, amount: float, doc_id: str, page_num: int) -> str:
+    raw = f"{date_str}|{description}|{amount:.2f}|{doc_id}|{page_num}"
     return hashlib.sha1(raw.encode()).hexdigest()[:16]

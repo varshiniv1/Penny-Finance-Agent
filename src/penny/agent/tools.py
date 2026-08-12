@@ -126,16 +126,25 @@ class ToolExecutor:
         self.last_subagent_usage = None
 
     def run(self, tool_name: str, tool_input: dict) -> Any:
-        if tool_name == "query_sql":
-            return self._query_sql(**tool_input)
-        elif tool_name == "search_text":
-            return self._search_text(**tool_input)
-        elif tool_name == "generate_chart":
-            return self._generate_chart(**tool_input)
-        elif tool_name == "categorize_transaction":
-            return self._categorize_transaction(**tool_input)
-        else:
-            return {"error": f"Unknown tool: {tool_name}"}
+        # A tool_use block must always get a matching tool_result, even if the
+        # model sends malformed input (missing/extra keys raise TypeError from
+        # the **tool_input unpacking below, before any inner try/except runs).
+        # Leaving that unhandled here would crash mid-turn with `history`
+        # already holding this tool_use and no result — breaking every
+        # subsequent turn with a 400 from the API.
+        try:
+            if tool_name == "query_sql":
+                return self._query_sql(**tool_input)
+            elif tool_name == "search_text":
+                return self._search_text(**tool_input)
+            elif tool_name == "generate_chart":
+                return self._generate_chart(**tool_input)
+            elif tool_name == "categorize_transaction":
+                return self._categorize_transaction(**tool_input)
+            else:
+                return {"error": f"Unknown tool: {tool_name}"}
+        except Exception as e:
+            return {"error": f"Tool call failed: {e}"}
 
     # Cap well below Ledger.query's own default (1000) — chat queries should be
     # aggregates (GROUP BY category/month/merchant, a handful of rows), not raw
@@ -176,11 +185,15 @@ class ToolExecutor:
     ) -> dict:
         from penny.charts.templates import render_chart
         try:
-            rows = self.ledger.query(sql)
+            rows = self.ledger.query(sql, limit=self._SQL_ROW_CAP)
             if not rows:
                 return {"error": "Query returned no data"}
             fig = render_chart(chart_type, rows, title, x_col, y_col, label_col, value_col)
-            return {"chart_json": fig.to_json(), "row_count": len(rows)}
+            return {
+                "chart_json": fig.to_json(),
+                "row_count": len(rows),
+                "truncated": len(rows) == self._SQL_ROW_CAP,
+            }
         except Exception as e:
             return {"error": str(e)}
 

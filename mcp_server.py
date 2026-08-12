@@ -10,8 +10,8 @@ Run standalone:
     python mcp_server.py path/to/penny_data.parquet
     # or: set PENNY_DATA_PATH and omit the argument
 
-Get a Parquet file via the "Export transactions (Parquet)" button on the
-Upload Statements page. See README.md for wiring this into
+Get a Parquet file via the "Export transactions (Parquet)" button in the
+app's sidebar "Session data" section. See README.md for wiring this into
 claude_desktop_config.json.
 """
 from __future__ import annotations
@@ -46,7 +46,11 @@ _fts = FTSIndex(":memory:")
 
 def _load(data_path: str) -> None:
     _ledger.import_parquet(Path(data_path))
-    rows = _ledger.query("SELECT id, description, merchant, category FROM transactions")
+    # limit set well above any realistic transaction count so a large
+    # snapshot doesn't get silently truncated when building the search index.
+    rows = _ledger.query(
+        "SELECT id, description, merchant, category FROM transactions", limit=1_000_000
+    )
     _fts.index(rows)
 
 

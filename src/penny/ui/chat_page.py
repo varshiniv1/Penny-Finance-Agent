@@ -10,13 +10,23 @@ from penny.ingest.enrich import enrich_batch
 from penny.ingest.extractor import extract
 from penny.ingest.parser import parse_file_bytes
 from penny.ingest.reconcile import reconcile
-from penny.ui.session import friendly_api_error, get_ledger, get_fts, get_history, log_usage, tx_count
+from penny.ui.session import (
+    friendly_api_error, get_ledger, get_fts, get_history, log_usage, reset_session, tx_count,
+)
 
 _FILE_TYPES = ["pdf", "csv", "jpg", "jpeg", "png", "tiff", "tif", "bmp"]
+_MAX_FILE_MB = 20
+# Cap how many chat turns are kept rendered/in memory — display_messages can
+# hold raw image/chart/file bytes per turn, which would otherwise grow
+# unbounded over a long session.
+_MAX_DISPLAY_MESSAGES = 200
 
 
 def _append(role: str, type_: str, **fields) -> None:
-    st.session_state["display_messages"].append({"role": role, "type": type_, **fields})
+    msgs = st.session_state["display_messages"]
+    msgs.append({"role": role, "type": type_, **fields})
+    if len(msgs) > _MAX_DISPLAY_MESSAGES:
+        del msgs[: len(msgs) - _MAX_DISPLAY_MESSAGES]
 
 
 def _render_message(msg: dict, key: str) -> None:
@@ -36,13 +46,21 @@ def _render_message(msg: dict, key: str) -> None:
 
 def _process_uploads(files: list, api_key: str) -> None:
     """Parse, reconcile and load attached statements, then post a summary as the assistant."""
-    ledger = get_ledger()
-    fts = get_fts()
-
     with st.chat_message("assistant"):
+        try:
+            ledger = get_ledger()
+            fts = get_fts()
+        except Exception as e:
+            st.error(friendly_api_error(e))
+            _append("assistant", "text", content=f"Couldn't open the transaction database: {e}")
+            return
+
         with st.spinner(f"Reading {len(files)} file{'s' if len(files) != 1 else ''}…"):
             all_transactions, errors = [], []
             for f in files:
+                if f.size > _MAX_FILE_MB * 1024 * 1024:
+                    errors.append(f"{f.name}: file is over {_MAX_FILE_MB}MB, skipped")
+                    continue
                 try:
                     raw_rows = parse_file_bytes(f.read(), f.name)
                     transactions = [t for r in raw_rows if (t := extract(r)) is not None]
@@ -50,9 +68,14 @@ def _process_uploads(files: list, api_key: str) -> None:
                 except Exception as e:
                     errors.append(f"{f.name}: {e}")
 
-            reconciled = reconcile(all_transactions)
-            n_new = ledger.upsert(reconciled)
-            fts.index(reconciled)
+            try:
+                reconciled = reconcile(all_transactions)
+                n_new = ledger.upsert(reconciled)
+                fts.index(reconciled)
+            except Exception as e:
+                st.error(friendly_api_error(e))
+                _append("assistant", "text", content=f"Couldn't save the parsed transactions: {e}")
+                return
 
             enrich_note = ""
             if api_key and reconciled:
@@ -90,7 +113,11 @@ def _process_uploads(files: list, api_key: str) -> None:
 
 
 def show() -> None:
-    st.header("💰 Penny")
+    header_col, reset_col = st.columns([6, 1])
+    header_col.header("💰 Penny")
+    if st.session_state.get("display_messages") and reset_col.button("🗑️ New chat", help="Clear the conversation and loaded transactions"):
+        reset_session()
+        st.rerun()
 
     if "display_messages" not in st.session_state:
         st.session_state["display_messages"] = []
@@ -148,8 +175,10 @@ def show() -> None:
 
     with st.chat_message("assistant"):
         text_placeholder = st.empty()
+        text_placeholder.markdown("_Thinking…_")
         accumulated_text = ""
         got_output = False
+        thinking_cleared = False
 
         def _flush_text() -> None:
             # Persist and lock in the current text segment, then start a
@@ -159,11 +188,18 @@ def show() -> None:
             if accumulated_text:
                 text_placeholder.markdown(accumulated_text)
                 _append("assistant", "text", content=accumulated_text)
+            else:
+                text_placeholder.empty()
             accumulated_text = ""
             text_placeholder = st.empty()
 
         try:
             for event in run_turn(text, history, ledger, fts, api_key):
+                if not thinking_cleared and event["type"] != "usage":
+                    thinking_cleared = True
+                    if event["type"] != "text":
+                        text_placeholder.empty()
+
                 if event["type"] == "usage":
                     log_usage(event["source"], event["model"], event["usage"])
 

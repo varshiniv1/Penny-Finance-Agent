@@ -85,7 +85,7 @@ def show() -> None:
         "Each source is a distinct call site: chat_turn (the main agent loop), "
         "chat_subagent_categorize (the categorize_transaction delegated sub-agent "
         "call), enrichment (merchant categorization on upload), and "
-        "dashboard_insight (the Dashboard's \"Generate Insights\" button)."
+        "upload_insight (the auto-generated spending summary posted after an upload)."
     )
     import pandas as pd
 

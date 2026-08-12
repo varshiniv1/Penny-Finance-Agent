@@ -36,7 +36,7 @@ st.set_page_config(
 )
 
 from penny.ui import chat_page, observability_page
-from penny.ui.session import get_ledger, tx_count
+from penny.ui.session import get_fts, get_ledger, tx_count
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -65,21 +65,38 @@ with st.sidebar:
                 import tempfile, pathlib
                 with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
                     tmp_path = pathlib.Path(tmp.name)
-                get_ledger().export_parquet(tmp_path)
-                st.download_button(
-                    "Download penny_data.parquet",
-                    data=tmp_path.read_bytes(),
-                    file_name="penny_data.parquet",
-                    mime="application/octet-stream",
-                )
+                try:
+                    get_ledger().export_parquet(tmp_path)
+                    st.download_button(
+                        "Download penny_data.parquet",
+                        data=tmp_path.read_bytes(),
+                        file_name="penny_data.parquet",
+                        mime="application/octet-stream",
+                    )
+                finally:
+                    tmp_path.unlink(missing_ok=True)
         restore = st.file_uploader("Restore from Parquet backup", type=["parquet"], key="restore")
         if restore and st.button("Restore"):
             import tempfile, pathlib
             with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
                 tmp.write(restore.read())
                 tmp_path = pathlib.Path(tmp.name)
-            n = get_ledger().import_parquet(tmp_path)
-            st.success(f"Restored. Total transactions: {n}")
+            try:
+                ledger = get_ledger()
+                n = ledger.import_parquet(tmp_path)
+                # import_parquet only touches the ledger — the FTS index needs
+                # the same rows explicitly, or restored transactions become
+                # invisible to search_text without any error to surface it.
+                # limit set well above any realistic transaction count so a
+                # large backup doesn't get silently truncated on reindex.
+                rows = ledger.query(
+                    "SELECT id, description, merchant, category FROM transactions",
+                    limit=1_000_000,
+                )
+                get_fts().index(rows)
+                st.success(f"Restored. Total transactions: {n}")
+            finally:
+                tmp_path.unlink(missing_ok=True)
 
     if _is_admin():
         st.divider()

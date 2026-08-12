@@ -53,6 +53,47 @@ _EXPORT_INTENT_RE = re.compile(
     r"\b(export|download|spreadsheet|excel|xlsx)\b", re.IGNORECASE
 )
 
+# Hard ceiling on tool-calling round trips within a single turn — a model
+# stuck in a retry loop (or one that just won't stop calling tools) should
+# fail closed instead of costing an unbounded number of API calls.
+_MAX_TOOL_ROUNDS = 20
+
+# Without this, `history` (and therefore the request body) grows for the
+# whole browser session — every turn resends the entire conversation,
+# including every past tool_result (a query_sql call alone can carry ~100
+# rows of JSON). Prompt caching makes that cheaper per token, but the token
+# *count* still climbs every turn and the cache itself expires after 5 min
+# idle, so a long or resumed session still pays full price for all of it.
+# Keeping only the most recent turns bounds both the cost and the context
+# window regardless of session length.
+#
+# Trimmed in batches, not down to the target every turn: the cache matches
+# the longest common *prefix* from the start of the message list, so if the
+# front of `history` shifted on every turn, every request would miss the
+# cache entirely and pay a fresh 1.25x write on top — worse than not
+# trimming at all. Holding the window steady between trims (only cutting
+# once _TRIM_SLACK extra turns have piled up, back down to
+# _MAX_HISTORY_TURNS) lets caching keep working normally in between.
+_MAX_HISTORY_TURNS = 20
+_TRIM_SLACK = 10
+
+
+def _trim_history(history: list[dict]) -> None:
+    """Drop the oldest turns once more than _MAX_HISTORY_TURNS + _TRIM_SLACK
+    have piled up, cutting back down to _MAX_HISTORY_TURNS — in place.
+
+    Only cuts at a genuine user-turn boundary — a "user" message with plain
+    string content — never at a tool_result continuation (also role="user"
+    but with list content), so a tool_use is never left without its result.
+    """
+    boundaries = [
+        i for i, m in enumerate(history) if m["role"] == "user" and isinstance(m["content"], str)
+    ]
+    if len(boundaries) <= _MAX_HISTORY_TURNS + _TRIM_SLACK:
+        return
+    cut = boundaries[-_MAX_HISTORY_TURNS]
+    del history[:cut]
+
 
 def _emit_code_execution_files(client, block) -> Generator[dict, None, None]:
     """Download any files a code_execution call produced — a chart image, or (with
@@ -111,6 +152,7 @@ def run_turn(
     # working context) and `history` (the caller's persistent record) in sync
     # from here on — every assistant/tool turn below is appended to both.
     history.append({"role": "user", "content": user_message})
+    _trim_history(history)
     messages = list(history)
 
     betas = ["code-execution-2025-08-25"]
@@ -119,7 +161,7 @@ def run_turn(
         betas.append("skills-2025-10-02")
         extra["container"] = {"skills": [{"type": "anthropic", "skill_id": "xlsx"}]}
 
-    while True:
+    for _round in range(_MAX_TOOL_ROUNDS):
         # .beta namespace: code_execution requires it; the xlsx skill (container.skills,
         # added above only when this turn looks export-related) needs the extra
         # skills-2025-10-02 beta too. Same params/behavior otherwise as
@@ -220,3 +262,10 @@ def run_turn(
         if response.stop_reason != "tool_use":
             yield {"type": "done"}
             break
+    else:
+        yield {
+            "type": "text",
+            "text": "\n\n_(Stopped after too many tool calls in one turn — try rephrasing "
+            "or breaking this into a smaller question.)_",
+        }
+        yield {"type": "done"}

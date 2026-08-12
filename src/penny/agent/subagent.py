@@ -36,7 +36,10 @@ def categorize_merchant(descriptor: str, api_key: str) -> tuple[dict, Any] | Non
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=128,
+        # Room for a web_search tool round (query + results) before the final
+        # two-line answer — 128 was tight enough to truncate before the
+        # Merchant/Category lines ever got emitted.
+        max_tokens=1024,
         system=_SUBAGENT_SYSTEM_PROMPT,
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": f'Statement line: "{descriptor}"'}],

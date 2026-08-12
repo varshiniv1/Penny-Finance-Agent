@@ -25,14 +25,28 @@ _MAX_DISPLAY_MESSAGES = 200
 
 
 _DOLLAR_RE = re.compile(r"(?<!\\)\$")
+_HEADING_RE = re.compile(r"^#{1,6}[ \t]+(.*)$", re.MULTILINE)
 
 
-def _escape_markdown_math(text: str) -> str:
-    """st.markdown renders paired `$...$` as inline LaTeX/KaTeX math — a
-    sentence with two dollar amounts like "$11,411.67 ... $718,000" gets torn
-    apart and rendered as a math expression instead of plain text. Escaping
-    literal `$` keeps dollar amounts in Claude's replies as plain text."""
-    return _DOLLAR_RE.sub(lambda m: "\\$", text)
+def _normalize_markdown(text: str) -> str:
+    """Tame LLM-generated Markdown for a chat bubble, not a full document:
+
+    - Downgrade ATX headings (#, ##, ...) to bold text. A heading renders as
+      a full page-size title — wildly oversized inside a chat message — bold
+      keeps it visually set apart as a section label without blowing up the
+      font size.
+    - Escape literal `$` so st.markdown doesn't treat a pair of them as
+      inline LaTeX/KaTeX math (a reply mentioning two dollar amounts, e.g.
+      "$11,411.67 ... $718,000", would otherwise have everything between
+      them silently rendered as a math expression instead of plain text).
+
+    Must run on the *whole* text, not per streamed chunk — a heading marker
+    or `$` can land split across two chunks, and the heading pattern needs a
+    full line to match reliably.
+    """
+    text = _HEADING_RE.sub(lambda m: f"**{m.group(1)}**", text)
+    text = _DOLLAR_RE.sub(lambda m: "\\$", text)
+    return text
 
 
 def _append(role: str, type_: str, **fields) -> None:
@@ -121,7 +135,7 @@ def _process_uploads(files: list, api_key: str) -> None:
         elif not api_key:
             summary += "\n\nAdd your Anthropic API key in the sidebar to enable categorization and chat."
 
-        summary = _escape_markdown_math(summary)
+        summary = _normalize_markdown(summary)
         st.markdown(summary)
         _append("assistant", "text", content=summary)
 
@@ -163,7 +177,7 @@ def show() -> None:
         if files:
             attachment_line = "📎 " + ", ".join(f.name for f in files)
             label = f"{attachment_line}\n\n{text}" if text else attachment_line
-        label = _escape_markdown_math(label)
+        label = _normalize_markdown(label)
         _append("user", "text", content=label)
         with st.chat_message("user"):
             st.markdown(label)
@@ -201,8 +215,9 @@ def show() -> None:
             # comes next (SQL/chart), instead of overwriting this one.
             nonlocal text_placeholder, accumulated_text
             if accumulated_text:
-                text_placeholder.markdown(accumulated_text)
-                _append("assistant", "text", content=accumulated_text)
+                normalized = _normalize_markdown(accumulated_text)
+                text_placeholder.markdown(normalized)
+                _append("assistant", "text", content=normalized)
             else:
                 text_placeholder.empty()
             accumulated_text = ""
@@ -219,8 +234,8 @@ def show() -> None:
                     log_usage(event["source"], event["model"], event["usage"])
 
                 elif event["type"] == "text":
-                    accumulated_text += _escape_markdown_math(event["text"])
-                    text_placeholder.markdown(accumulated_text + "▌")
+                    accumulated_text += event["text"]
+                    text_placeholder.markdown(_normalize_markdown(accumulated_text) + "▌")
                     got_output = True
 
                 elif event["type"] == "sql":

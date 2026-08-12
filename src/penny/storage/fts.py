@@ -10,8 +10,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS tx_text USING fts5(
     tx_id,
     description,
     merchant,
-    category,
-    content=''
+    category
 );
 """
 

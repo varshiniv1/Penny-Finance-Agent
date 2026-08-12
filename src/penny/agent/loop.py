@@ -41,8 +41,12 @@ def _with_cache_breakpoint(messages: list[dict]) -> list[dict]:
     return [*rest, {**last, "content": content}]
 
 
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
 def _emit_code_execution_files(client, block) -> Generator[dict, None, None]:
-    """Download any files a code_execution call produced (e.g. a saved chart image).
+    """Download any files a code_execution call produced — a chart image, or (with
+    the xlsx skill enabled) a generated spreadsheet.
 
     Best-effort: a download failure surfaces as a text note rather than
     breaking the turn, since the code execution itself already succeeded.
@@ -59,9 +63,12 @@ def _emit_code_execution_files(client, block) -> Generator[dict, None, None]:
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                 tmp_path = Path(tmp.name)
             downloaded.write_to_file(tmp_path)
-            image_bytes = tmp_path.read_bytes()
+            file_bytes = tmp_path.read_bytes()
             tmp_path.unlink(missing_ok=True)
-            yield {"type": "image", "filename": metadata.filename, "image_bytes": image_bytes}
+            if suffix.lower() in _IMAGE_EXTS:
+                yield {"type": "image", "filename": metadata.filename, "image_bytes": file_bytes}
+            else:
+                yield {"type": "file", "filename": metadata.filename, "file_bytes": file_bytes}
         except Exception as e:
             yield {"type": "text", "text": f"\n_(couldn't retrieve generated file: {e})_\n"}
 
@@ -83,11 +90,12 @@ def run_turn(
       {"type": "sql",            "sql": "..."}
       {"type": "code_execution", "block": {...}}
       {"type": "image",          "filename": "...", "image_bytes": b"..."}
+      {"type": "file",           "filename": "...", "file_bytes": b"..."}
       {"type": "usage",          "model": "...", "usage": ...}
       {"type": "done"}
     """
     client = anthropic.Anthropic(api_key=api_key)
-    executor = ToolExecutor(ledger, fts)
+    executor = ToolExecutor(ledger, fts, api_key)
 
     # Persist the user's message immediately, and keep `messages` (this turn's
     # working context) and `history` (the caller's persistent record) in sync
@@ -96,12 +104,17 @@ def run_turn(
     messages = list(history)
 
     while True:
-        response = client.messages.create(
+        # .beta namespace: code_execution's Excel-generation skill (container.skills)
+        # and the Skills API both require it. Same params/behavior otherwise as
+        # client.messages.create — a superset, not a different call shape.
+        response = client.beta.messages.create(
             model=model,
             max_tokens=4096,
             system=_CACHED_SYSTEM,
             tools=TOOL_SCHEMAS,
             messages=_with_cache_breakpoint(messages),
+            betas=["code-execution-2025-08-25", "skills-2025-10-02"],
+            container={"skills": [{"type": "anthropic", "skill_id": "xlsx"}]},
         )
         yield {"type": "usage", "model": model, "usage": response.usage}
 
@@ -161,6 +174,17 @@ def run_turn(
                 # Emit chart JSON if generate_chart succeeded
                 if tool_name == "generate_chart" and "chart_json" in result:
                     yield {"type": "chart", "chart_json": result["chart_json"]}
+
+                # categorize_transaction makes its own independent API call (a
+                # sub-agent) outside this loop's own request — surface its usage
+                # the same way so Observability still sees it.
+                if executor.last_subagent_usage is not None:
+                    yield {
+                        "type": "usage",
+                        "model": "claude-haiku-4-5-20251001",
+                        "usage": executor.last_subagent_usage,
+                    }
+                    executor.last_subagent_usage = None
 
                 tool_result_content.append({
                     "type": "tool_result",

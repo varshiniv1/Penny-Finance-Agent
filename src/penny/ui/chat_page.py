@@ -26,7 +26,7 @@ def show() -> None:
 
     # Render conversation history
     history = get_history()
-    for msg in st.session_state.get("display_messages", []):
+    for i, msg in enumerate(st.session_state.get("display_messages", [])):
         with st.chat_message(msg["role"]):
             if msg["type"] == "text":
                 st.markdown(msg["content"])
@@ -37,6 +37,13 @@ def show() -> None:
                 st.plotly_chart(fig, use_container_width=True)
             elif msg["type"] == "image":
                 st.image(msg["content"])
+            elif msg["type"] == "file":
+                st.download_button(
+                    f"Download {msg['filename']}",
+                    data=msg["content"],
+                    file_name=msg["filename"],
+                    key=f"history_dl_{i}",
+                )
 
     # Input
     user_input = st.chat_input("Ask about your spending…")
@@ -105,6 +112,24 @@ def show() -> None:
                     st.image(event["image_bytes"])
                     st.session_state["display_messages"].append(
                         {"role": "assistant", "type": "image", "content": event["image_bytes"]}
+                    )
+                    got_output = True
+
+                elif event["type"] == "file":
+                    _flush_text()
+                    st.download_button(
+                        f"Download {event['filename']}",
+                        data=event["file_bytes"],
+                        file_name=event["filename"],
+                        key=f"live_dl_{len(st.session_state['display_messages'])}",
+                    )
+                    st.session_state["display_messages"].append(
+                        {
+                            "role": "assistant",
+                            "type": "file",
+                            "filename": event["filename"],
+                            "content": event["file_bytes"],
+                        }
                     )
                     got_output = True
 

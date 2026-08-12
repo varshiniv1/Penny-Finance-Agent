@@ -91,15 +91,39 @@ TOOL_SCHEMAS = [
         "type": "code_execution_20260521",
         "name": "code_execution",
     },
+    {
+        "name": "categorize_transaction",
+        "description": (
+            "Delegate merchant/category classification to a specialist sub-agent — an "
+            "independent Claude call with its own focused context, separate from this "
+            "conversation. Use for a transaction whose merchant/category is missing or "
+            "looks wrong. Persists the result to the ledger, so future queries reflect it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "descriptor": {
+                    "type": "string",
+                    "description": "The raw transaction description exactly as stored (the `description` column).",
+                }
+            },
+            "required": ["descriptor"],
+        },
+    },
 ]
 
 
 # ── Tool executor ─────────────────────────────────────────────────────────────
 
 class ToolExecutor:
-    def __init__(self, ledger: "Ledger", fts: "FTSIndex"):
+    def __init__(self, ledger: "Ledger", fts: "FTSIndex", api_key: str = ""):
         self.ledger = ledger
         self.fts = fts
+        self.api_key = api_key
+        # Sub-agent calls (categorize_transaction) make their own API request outside
+        # this class's control; stash its usage here so the caller (loop.py) can still
+        # surface it as a normal usage event for Observability logging.
+        self.last_subagent_usage = None
 
     def run(self, tool_name: str, tool_input: dict) -> Any:
         if tool_name == "query_sql":
@@ -108,6 +132,8 @@ class ToolExecutor:
             return self._search_text(**tool_input)
         elif tool_name == "generate_chart":
             return self._generate_chart(**tool_input)
+        elif tool_name == "categorize_transaction":
+            return self._categorize_transaction(**tool_input)
         else:
             return {"error": f"Unknown tool: {tool_name}"}
 
@@ -146,3 +172,21 @@ class ToolExecutor:
             return {"chart_json": fig.to_json(), "row_count": len(rows)}
         except Exception as e:
             return {"error": str(e)}
+
+    def _categorize_transaction(self, descriptor: str) -> dict:
+        from penny.agent.subagent import categorize_merchant
+
+        if not self.api_key:
+            return {"error": "No API key available for sub-agent delegation."}
+        try:
+            result = categorize_merchant(descriptor, self.api_key)
+        except Exception as e:
+            return {"error": str(e)}
+        if result is None:
+            return {"error": "Sub-agent couldn't confidently classify this transaction."}
+
+        classification, usage = result
+        self.last_subagent_usage = usage
+        self.ledger.upsert_merchants([{"descriptor": descriptor, **classification}])
+        self.ledger.apply_merchant_names()
+        return {**classification, "persisted": True}

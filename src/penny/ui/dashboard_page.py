@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from penny.agent.insights import insight
 from penny.charts.templates import (
     spending_by_category,
     monthly_trend,
@@ -10,7 +11,7 @@ from penny.charts.templates import (
     category_pie,
     recurring_charges,
 )
-from penny.ui.session import get_ledger, tx_count
+from penny.ui.session import friendly_api_error, get_ledger, log_usage, tx_count
 
 
 def _render(compute, empty_message: str) -> None:
@@ -51,6 +52,35 @@ def show() -> None:
         c2.metric("Transactions", r["tx_count"] or 0)
         c3.metric("From", str(r["earliest"] or "—"))
         c4.metric("To", str(r["latest"] or "—"))
+
+    st.divider()
+
+    # ── Agentic insights ─────────────────────────────────────────────────────
+    api_key = st.session_state.get("api_key", "")
+    current_tx_count = tx_count()
+    if st.session_state.get("dashboard_insight_tx_count") != current_tx_count:
+        st.session_state.pop("dashboard_insight", None)
+
+    cached_insight = st.session_state.get("dashboard_insight")
+    if cached_insight:
+        st.info(cached_insight)
+    elif not api_key:
+        st.caption("Add your Anthropic API key in the sidebar to generate spending insights.")
+    elif st.button("Generate Insights"):
+        try:
+            with st.spinner("Analyzing your spending…"):
+                result = insight(ledger, api_key)
+        except Exception as e:
+            st.error(friendly_api_error(e))
+        else:
+            if result:
+                text, usage = result
+                st.session_state["dashboard_insight"] = text
+                st.session_state["dashboard_insight_tx_count"] = current_tx_count
+                log_usage("dashboard_insight", "claude-haiku-4-5-20251001", usage)
+                st.info(text)
+            else:
+                st.info("Not enough categorized data yet to generate insights.")
 
     st.divider()
 

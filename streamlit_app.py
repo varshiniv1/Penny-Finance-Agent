@@ -18,7 +18,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from penny.ui import upload_page, chat_page, dashboard_page
+from penny.ui import upload_page, chat_page, dashboard_page, observability_page
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -42,7 +42,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigate",
-        ["Upload Statements", "Chat with Penny", "Dashboard"],
+        ["Upload Statements", "Chat with Penny", "Dashboard", "Observability"],
         label_visibility="collapsed",
     )
 
@@ -60,3 +60,5 @@ elif page == "Chat with Penny":
     chat_page.show()
 elif page == "Dashboard":
     dashboard_page.show()
+elif page == "Observability":
+    observability_page.show()

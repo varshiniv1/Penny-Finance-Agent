@@ -7,7 +7,7 @@ from penny.ingest.parser import parse_file_bytes
 from penny.ingest.extractor import extract
 from penny.ingest.reconcile import reconcile
 from penny.ingest.enrich import enrich_batch
-from penny.ui.session import get_ledger, get_fts, tx_count
+from penny.ui.session import friendly_api_error, get_ledger, get_fts, log_usage, tx_count
 
 
 def show() -> None:
@@ -50,12 +50,13 @@ def show() -> None:
             progress.progress(1.0, text="Enriching merchants…")
             try:
                 stats = enrich_batch(ledger, api_key)
+                log_usage("enrichment", "claude-haiku-4-5-20251001", stats.get("usage"))
                 st.info(
                     f"Merchant enrichment: {stats['rules']} matched by rules, "
                     f"{stats['web']} via web search, {stats['ambiguous']} ambiguous."
                 )
             except Exception as e:
-                st.error(f"Merchant enrichment failed: {e}")
+                st.error(friendly_api_error(e))
         else:
             st.info("Add your Anthropic API key in the sidebar to enable merchant enrichment.")
 

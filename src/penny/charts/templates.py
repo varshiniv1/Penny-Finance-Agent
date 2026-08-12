@@ -94,7 +94,7 @@ def monthly_trend(ledger) -> go.Figure | None:
 
 def top_merchants(ledger, n: int = 10) -> go.Figure | None:
     rows = ledger.query(
-        f"SELECT COALESCE(merchant, description) AS name, SUM(amount) AS total "
+        f"SELECT COALESCE(NULLIF(merchant, ''), description) AS name, SUM(amount) AS total "
         f"FROM transactions WHERE is_internal = false AND amount > 0 "
         f"GROUP BY name ORDER BY total DESC LIMIT {n}"
     )
@@ -113,7 +113,7 @@ def category_pie(ledger) -> go.Figure | None:
 def recurring_charges(ledger) -> go.Figure | None:
     rows = ledger.query(
         """
-        SELECT COALESCE(merchant, description) AS name,
+        SELECT COALESCE(NULLIF(merchant, ''), description) AS name,
                COUNT(*) AS occurrences,
                AVG(amount) AS avg_amount,
                SUM(amount) AS total

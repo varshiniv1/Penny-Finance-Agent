@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import tempfile
+from pathlib import Path
 from typing import Any, Generator, TYPE_CHECKING
 
 import anthropic
@@ -39,21 +41,49 @@ def _with_cache_breakpoint(messages: list[dict]) -> list[dict]:
     return [*rest, {**last, "content": content}]
 
 
+def _emit_code_execution_files(client, block) -> Generator[dict, None, None]:
+    """Download any files a code_execution call produced (e.g. a saved chart image).
+
+    Best-effort: a download failure surfaces as a text note rather than
+    breaking the turn, since the code execution itself already succeeded.
+    """
+    result = getattr(block, "content", None)
+    file_refs = getattr(result, "content", None) or []
+    for file_ref in file_refs:
+        if getattr(file_ref, "type", None) != "bash_code_execution_output":
+            continue
+        try:
+            metadata = client.beta.files.retrieve_metadata(file_ref.file_id)
+            downloaded = client.beta.files.download(file_ref.file_id)
+            suffix = Path(metadata.filename).suffix or ".png"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp_path = Path(tmp.name)
+            downloaded.write_to_file(tmp_path)
+            image_bytes = tmp_path.read_bytes()
+            tmp_path.unlink(missing_ok=True)
+            yield {"type": "image", "filename": metadata.filename, "image_bytes": image_bytes}
+        except Exception as e:
+            yield {"type": "text", "text": f"\n_(couldn't retrieve generated file: {e})_\n"}
+
+
 def run_turn(
     user_message: str,
     history: list[dict],
     ledger: "Ledger",
     fts: "FTSIndex",
     api_key: str,
-    model: str = "claude-sonnet-4-6",
+    model: str = "claude-haiku-4-5-20251001",
 ) -> Generator[dict, None, None]:
     """
     Run one conversational turn, yielding events as they happen:
-      {"type": "text",       "text": "..."}
-      {"type": "tool_call",  "name": "...", "input": {...}}
-      {"type": "tool_result","name": "...", "result": {...}}
-      {"type": "chart",      "chart_json": "..."}
-      {"type": "sql",        "sql": "..."}
+      {"type": "text",           "text": "..."}
+      {"type": "tool_call",      "name": "...", "input": {...}}
+      {"type": "tool_result",    "name": "...", "result": {...}}
+      {"type": "chart",          "chart_json": "..."}
+      {"type": "sql",            "sql": "..."}
+      {"type": "code_execution", "block": {...}}
+      {"type": "image",          "filename": "...", "image_bytes": b"..."}
+      {"type": "usage",          "model": "...", "usage": ...}
       {"type": "done"}
     """
     client = anthropic.Anthropic(api_key=api_key)
@@ -73,6 +103,7 @@ def run_turn(
             tools=TOOL_SCHEMAS,
             messages=_with_cache_breakpoint(messages),
         )
+        yield {"type": "usage", "model": model, "usage": response.usage}
 
         # A single response can contain text AND multiple tool_use blocks —
         # collect them all before touching history, so the reconstructed
@@ -94,6 +125,18 @@ def run_turn(
                 })
                 tool_use_blocks.append(block)
 
+            else:
+                # Server-side tools (web_search, code_execution, ...) are
+                # already fully resolved by the API within this response —
+                # no tool_result round-trip needed on our end. Preserve the
+                # block as-is so it round-trips correctly if the conversation
+                # continues, instead of silently dropping it from history.
+                block_dict = block.model_dump()
+                assistant_content.append(block_dict)
+                if block.type == "bash_code_execution_tool_result":
+                    yield {"type": "code_execution", "block": block_dict}
+                    yield from _emit_code_execution_files(client, block)
+
         history.append({"role": "assistant", "content": assistant_content})
         messages.append({"role": "assistant", "content": assistant_content})
 
@@ -111,13 +154,7 @@ def run_turn(
 
                 yield {"type": "tool_call", "name": tool_name, "input": tool_input}
 
-                # web_search is handled by Anthropic natively; other tools run locally
-                if tool_name == "web_search":
-                    # The API handles this; we pass the tool_result block from the response
-                    # This branch shouldn't be reached in normal flow
-                    result = {"info": "Web search handled natively by the API"}
-                else:
-                    result = executor.run(tool_name, tool_input)
+                result = executor.run(tool_name, tool_input)
 
                 yield {"type": "tool_result", "name": tool_name, "result": result}
 

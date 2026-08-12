@@ -87,6 +87,10 @@ TOOL_SCHEMAS = [
         "type": "web_search_20250305",
         "name": "web_search",
     },
+    {
+        "type": "code_execution_20260521",
+        "name": "code_execution",
+    },
 ]
 
 

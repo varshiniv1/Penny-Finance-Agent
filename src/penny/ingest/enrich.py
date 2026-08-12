@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from penny.storage.ledger import Ledger
@@ -66,75 +66,93 @@ def enrich_batch(ledger: "Ledger", api_key: str, max_batch: int = 50) -> dict:
     """
     For each uncached descriptor:
       1. Try rule-based first.
-      2. For unknowns, ask Claude with web_search.
-    Returns {"rules": n, "web": n, "ambiguous": n}.
+      2. For unknowns, ask Claude to classify all of them in one batched request
+         (web_search stays available for anything it's unsure of, but as a tool
+         call within that single request, not a separate round-trip per item).
+    Returns {"rules": n, "web": n, "ambiguous": n, "usage": <Usage | None>}.
     """
     import anthropic
 
     descriptors = ledger.uncached_descriptors()
     if not descriptors:
-        return {"rules": 0, "web": 0, "ambiguous": 0}
+        return {"rules": 0, "web": 0, "ambiguous": 0, "usage": None}
 
-    rule_entries, web_descriptors = [], []
+    rule_entries, remaining = [], []
     for d in descriptors:
         merchant, category = apply_rules(d)
         if merchant:
             rule_entries.append({"descriptor": d, "merchant": merchant, "category": category})
         else:
-            web_descriptors.append(d)
+            remaining.append(d)
 
     ledger.upsert_merchants(rule_entries)
 
-    client = anthropic.Anthropic(api_key=api_key)
-    web_entries, ambiguous = [], []
-
-    for descriptor in web_descriptors[:max_batch]:
-        result = _web_lookup(client, descriptor)
-        if result:
-            web_entries.append({"descriptor": descriptor, **result})
-        else:
-            ambiguous.append(descriptor)
+    web_entries, ambiguous, usage = [], [], None
+    batch = remaining[:max_batch]
+    if batch:
+        client = anthropic.Anthropic(api_key=api_key)
+        results, usage = _batch_lookup(client, batch)
+        for d in batch:
+            result = results.get(d)
+            if result:
+                web_entries.append({"descriptor": d, **result})
+            else:
+                ambiguous.append(d)
 
     ledger.upsert_merchants(web_entries)
     ledger.apply_merchant_names()
 
-    return {"rules": len(rule_entries), "web": len(web_entries), "ambiguous": len(ambiguous)}
+    return {
+        "rules": len(rule_entries), "web": len(web_entries), "ambiguous": len(ambiguous),
+        "usage": usage,
+    }
 
 
-def _web_lookup(client, descriptor: str) -> dict | None:
-    """Ask Claude to identify the merchant via web search."""
+_CATEGORIES = (
+    "Dining, Shopping, Groceries, Transport, Health, Subscriptions, "
+    "Utilities, Entertainment, Travel, Income, Transfer, Cash, Other"
+)
+_BATCH_LINE_RE = re.compile(r"^\s*(\d+)\.\s*Merchant:\s*(.+?)\s*\|\s*Category:\s*(.+?)\s*$", re.IGNORECASE)
+
+
+def _batch_lookup(client, descriptors: list[str]) -> tuple[dict[str, dict], Any]:
+    """Ask Claude to identify merchant + category for all descriptors in one request.
+
+    Returns (results_by_descriptor, usage) — usage is None if the call failed.
+    """
+    numbered = "\n".join(f"{i}. {d}" for i, d in enumerate(descriptors, start=1))
     prompt = (
-        f'What business or merchant corresponds to this bank statement descriptor: "{descriptor}"? '
-        "Reply with exactly two lines:\nMerchant: <business name>\nCategory: <one of: Dining, Shopping, "
-        "Groceries, Transport, Health, Subscriptions, Utilities, Entertainment, Travel, Income, Transfer, Cash, Other>"
+        "Identify the merchant and spending category for each of these bank statement "
+        "line descriptions. Use web search only for names you don't already recognize. "
+        f"Reply with exactly one line per item, in order, formatted as:\n"
+        f"<number>. Merchant: <business name> | Category: <one of: {_CATEGORIES}>\n\n"
+        f"{numbered}"
     )
     try:
         resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=128,
+            max_tokens=min(4096, 60 * len(descriptors) + 256),
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": prompt}],
         )
-        text = _extract_text(resp)
-        return _parse_lookup_response(text)
     except Exception:
-        return None
+        return {}, None
+
+    text = _extract_text(resp)
+    by_index: dict[int, dict] = {}
+    for line in text.splitlines():
+        m = _BATCH_LINE_RE.match(line)
+        if m:
+            idx, merchant, category = m.groups()
+            by_index[int(idx)] = {"merchant": merchant, "category": category}
+
+    results = {
+        descriptor: by_index[i]
+        for i, descriptor in enumerate(descriptors, start=1)
+        if i in by_index
+    }
+    return results, resp.usage
 
 
 def _extract_text(response) -> str:
-    for block in response.content:
-        if hasattr(block, "text"):
-            return block.text
-    return ""
-
-
-def _parse_lookup_response(text: str) -> dict | None:
-    merchant, category = None, None
-    for line in text.splitlines():
-        if line.lower().startswith("merchant:"):
-            merchant = line.split(":", 1)[1].strip()
-        elif line.lower().startswith("category:"):
-            category = line.split(":", 1)[1].strip()
-    if merchant and category:
-        return {"merchant": merchant, "category": category}
-    return None
+    return "".join(block.text for block in response.content if hasattr(block, "text"))

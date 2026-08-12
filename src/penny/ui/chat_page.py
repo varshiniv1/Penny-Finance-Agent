@@ -7,7 +7,7 @@ import plotly.io as pio
 import streamlit as st
 
 from penny.agent.loop import run_turn
-from penny.ui.session import get_ledger, get_fts, get_history, tx_count
+from penny.ui.session import friendly_api_error, get_ledger, get_fts, get_history, log_usage, tx_count
 
 
 def show() -> None:
@@ -35,6 +35,8 @@ def show() -> None:
             elif msg["type"] == "chart":
                 fig = pio.from_json(msg["content"])
                 st.plotly_chart(fig, use_container_width=True)
+            elif msg["type"] == "image":
+                st.image(msg["content"])
 
     # Input
     user_input = st.chat_input("Ask about your spending…")
@@ -71,33 +73,48 @@ def show() -> None:
             accumulated_text = ""
             text_placeholder = st.empty()
 
-        for event in run_turn(user_input, history, ledger, fts, api_key):
-            if event["type"] == "text":
-                accumulated_text += event["text"]
-                text_placeholder.markdown(accumulated_text + "▌")
-                got_output = True
+        try:
+            for event in run_turn(user_input, history, ledger, fts, api_key):
+                if event["type"] == "usage":
+                    log_usage("chat", event["model"], event["usage"])
 
-            elif event["type"] == "sql":
-                _flush_text()
-                st.code(event["sql"], language="sql")
-                st.session_state["display_messages"].append(
-                    {"role": "assistant", "type": "sql", "content": event["sql"]}
-                )
-                got_output = True
+                elif event["type"] == "text":
+                    accumulated_text += event["text"]
+                    text_placeholder.markdown(accumulated_text + "▌")
+                    got_output = True
 
-            elif event["type"] == "chart":
-                _flush_text()
-                fig = pio.from_json(event["chart_json"])
-                st.plotly_chart(fig, use_container_width=True)
-                st.session_state["display_messages"].append(
-                    {"role": "assistant", "type": "chart", "content": event["chart_json"]}
-                )
-                got_output = True
+                elif event["type"] == "sql":
+                    _flush_text()
+                    st.code(event["sql"], language="sql")
+                    st.session_state["display_messages"].append(
+                        {"role": "assistant", "type": "sql", "content": event["sql"]}
+                    )
+                    got_output = True
 
-            elif event["type"] == "done":
-                _flush_text()
-                if not got_output:
-                    st.warning("Penny didn't return a response — try rephrasing your question.")
+                elif event["type"] == "chart":
+                    _flush_text()
+                    fig = pio.from_json(event["chart_json"])
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.session_state["display_messages"].append(
+                        {"role": "assistant", "type": "chart", "content": event["chart_json"]}
+                    )
+                    got_output = True
+
+                elif event["type"] == "image":
+                    _flush_text()
+                    st.image(event["image_bytes"])
+                    st.session_state["display_messages"].append(
+                        {"role": "assistant", "type": "image", "content": event["image_bytes"]}
+                    )
+                    got_output = True
+
+                elif event["type"] == "done":
+                    _flush_text()
+                    if not got_output:
+                        st.warning("Penny didn't return a response — try rephrasing your question.")
+        except Exception as e:
+            _flush_text()
+            st.error(friendly_api_error(e))
 
     # Keep history for next turn (already updated by run_turn)
     st.session_state["history"] = history

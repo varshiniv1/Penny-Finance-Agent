@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Generator, TYPE_CHECKING
@@ -42,6 +43,15 @@ def _with_cache_breakpoint(messages: list[dict]) -> list[dict]:
 
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+# The xlsx skill's description sits in context on every turn it's attached,
+# even when unused — cheap per-turn, but there's no reason to pay it on
+# messages that plainly aren't about exporting. Checked once against the
+# turn's initial user message (not re-checked per tool-calling round), so a
+# multi-step "query then export" turn keeps the skill for its whole duration.
+_EXPORT_INTENT_RE = re.compile(
+    r"\b(export|download|spreadsheet|excel|xlsx)\b", re.IGNORECASE
+)
 
 
 def _emit_code_execution_files(client, block) -> Generator[dict, None, None]:
@@ -103,9 +113,16 @@ def run_turn(
     history.append({"role": "user", "content": user_message})
     messages = list(history)
 
+    betas = ["code-execution-2025-08-25"]
+    extra: dict[str, Any] = {}
+    if _EXPORT_INTENT_RE.search(user_message):
+        betas.append("skills-2025-10-02")
+        extra["container"] = {"skills": [{"type": "anthropic", "skill_id": "xlsx"}]}
+
     while True:
-        # .beta namespace: code_execution's Excel-generation skill (container.skills)
-        # and the Skills API both require it. Same params/behavior otherwise as
+        # .beta namespace: code_execution requires it; the xlsx skill (container.skills,
+        # added above only when this turn looks export-related) needs the extra
+        # skills-2025-10-02 beta too. Same params/behavior otherwise as
         # client.messages.create — a superset, not a different call shape.
         response = client.beta.messages.create(
             model=model,
@@ -113,8 +130,8 @@ def run_turn(
             system=_CACHED_SYSTEM,
             tools=TOOL_SCHEMAS,
             messages=_with_cache_breakpoint(messages),
-            betas=["code-execution-2025-08-25", "skills-2025-10-02"],
-            container={"skills": [{"type": "anthropic", "skill_id": "xlsx"}]},
+            betas=betas,
+            **extra,
         )
         yield {"type": "usage", "source": "chat_turn", "model": model, "usage": response.usage}
 

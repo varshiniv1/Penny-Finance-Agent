@@ -137,12 +137,23 @@ class ToolExecutor:
         else:
             return {"error": f"Unknown tool: {tool_name}"}
 
+    # Cap well below Ledger.query's own default (1000) — chat queries should be
+    # aggregates (GROUP BY category/month/merchant, a handful of rows), not raw
+    # dumps. Not exposed to the model via the tool's input_schema, so it can't
+    # just ask for more; "Browse all transactions" on the Dashboard is the
+    # intended path for a full raw listing.
+    _SQL_ROW_CAP = 100
+
     def _query_sql(self, sql: str) -> dict:
         try:
-            rows = self.ledger.query(sql)
+            rows = self.ledger.query(sql, limit=self._SQL_ROW_CAP)
             q_hash = hashlib.sha1(sql.encode()).hexdigest()[:12]
             self.ledger.cache_query(q_hash, sql)
-            return {"rows": rows, "count": len(rows)}
+            return {
+                "rows": rows,
+                "count": len(rows),
+                "truncated": len(rows) == self._SQL_ROW_CAP,
+            }
         except Exception as e:
             return {"error": str(e)}
 

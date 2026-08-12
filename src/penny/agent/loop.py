@@ -34,7 +34,11 @@ def run_turn(
     client = anthropic.Anthropic(api_key=api_key)
     executor = ToolExecutor(ledger, fts)
 
-    messages = history + [{"role": "user", "content": user_message}]
+    # Persist the user's message immediately, and keep `messages` (this turn's
+    # working context) and `history` (the caller's persistent record) in sync
+    # from here on — every assistant/tool turn below is appended to both.
+    history.append({"role": "user", "content": user_message})
+    messages = list(history)
 
     while True:
         response = client.messages.create(
@@ -45,8 +49,11 @@ def run_turn(
             messages=messages,
         )
 
-        # Collect assistant content for history
+        # A single response can contain text AND multiple tool_use blocks —
+        # collect them all before touching history, so the reconstructed
+        # conversation matches what the model actually produced.
         assistant_content = []
+        tool_use_blocks = []
 
         for block in response.content:
             if block.type == "text":
@@ -54,6 +61,22 @@ def run_turn(
                 assistant_content.append({"type": "text", "text": block.text})
 
             elif block.type == "tool_use":
+                assistant_content.append({
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                })
+                tool_use_blocks.append(block)
+
+        history.append({"role": "assistant", "content": assistant_content})
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        if tool_use_blocks:
+            # All tool_result blocks for this turn's tool_use blocks must be
+            # returned together in a single following user turn.
+            tool_result_content = []
+            for block in tool_use_blocks:
                 tool_name = block.name
                 tool_input = block.input
 
@@ -62,12 +85,6 @@ def run_turn(
                     yield {"type": "sql", "sql": tool_input.get("sql", "")}
 
                 yield {"type": "tool_call", "name": tool_name, "input": tool_input}
-                assistant_content.append({
-                    "type": "tool_use",
-                    "id": block.id,
-                    "name": tool_name,
-                    "input": tool_input,
-                })
 
                 # web_search is handled by Anthropic natively; other tools run locally
                 if tool_name == "web_search":
@@ -83,25 +100,16 @@ def run_turn(
                 if tool_name == "generate_chart" and "chart_json" in result:
                     yield {"type": "chart", "chart_json": result["chart_json"]}
 
-                messages = messages + [
-                    {"role": "assistant", "content": assistant_content},
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": json.dumps(result, default=str),
-                            }
-                        ],
-                    },
-                ]
-                assistant_content = []  # reset for next loop
+                tool_result_content.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": json.dumps(result, default=str),
+                })
+
+            history.append({"role": "user", "content": tool_result_content})
+            messages.append({"role": "user", "content": tool_result_content})
 
         if response.stop_reason == "end_turn":
-            # Append the final assistant turn to history for the caller
-            if assistant_content:
-                history.append({"role": "assistant", "content": assistant_content})
             yield {"type": "done"}
             break
 

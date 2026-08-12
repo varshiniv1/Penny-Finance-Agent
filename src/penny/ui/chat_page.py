@@ -56,32 +56,48 @@ def show() -> None:
     with st.chat_message("assistant"):
         text_placeholder = st.empty()
         accumulated_text = ""
+        got_output = False
+
+        def _flush_text() -> None:
+            # Persist and lock in the current text segment, then start a
+            # fresh placeholder so the next segment renders below whatever
+            # comes next (SQL/chart), instead of overwriting this one.
+            nonlocal text_placeholder, accumulated_text
+            if accumulated_text:
+                text_placeholder.markdown(accumulated_text)
+                st.session_state["display_messages"].append(
+                    {"role": "assistant", "type": "text", "content": accumulated_text}
+                )
+            accumulated_text = ""
+            text_placeholder = st.empty()
 
         for event in run_turn(user_input, history, ledger, fts, api_key):
             if event["type"] == "text":
                 accumulated_text += event["text"]
                 text_placeholder.markdown(accumulated_text + "▌")
+                got_output = True
 
             elif event["type"] == "sql":
-                text_placeholder.markdown(accumulated_text)
+                _flush_text()
                 st.code(event["sql"], language="sql")
                 st.session_state["display_messages"].append(
                     {"role": "assistant", "type": "sql", "content": event["sql"]}
                 )
+                got_output = True
 
             elif event["type"] == "chart":
+                _flush_text()
                 fig = pio.from_json(event["chart_json"])
                 st.plotly_chart(fig, use_container_width=True)
                 st.session_state["display_messages"].append(
                     {"role": "assistant", "type": "chart", "content": event["chart_json"]}
                 )
+                got_output = True
 
             elif event["type"] == "done":
-                text_placeholder.markdown(accumulated_text)
-                if accumulated_text:
-                    st.session_state["display_messages"].append(
-                        {"role": "assistant", "type": "text", "content": accumulated_text}
-                    )
+                _flush_text()
+                if not got_output:
+                    st.warning("Penny didn't return a response — try rephrasing your question.")
 
     # Keep history for next turn (already updated by run_turn)
     st.session_state["history"] = history

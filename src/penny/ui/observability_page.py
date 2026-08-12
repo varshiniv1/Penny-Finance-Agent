@@ -1,6 +1,8 @@
 """Streamlit page: token usage and estimated cost across every API call this session."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import streamlit as st
 
 from penny.ui.session import get_usage_log
@@ -14,6 +16,18 @@ _PRICING = {
     "claude-opus-5": (5.00, 25.00),
 }
 _DEFAULT_PRICING = (3.00, 15.00)
+
+
+def _tokens_last_minute(log: list[dict]) -> tuple[int, int]:
+    """(input_tokens, output_tokens) summed over entries from the last 60s."""
+    now = datetime.now(timezone.utc)
+    inp = out = 0
+    for e in log:
+        ts = datetime.fromisoformat(e["timestamp"])
+        if (now - ts).total_seconds() <= 60:
+            inp += e["input_tokens"]
+            out += e["output_tokens"]
+    return inp, out
 
 
 def _estimate_cost(entry: dict) -> float:
@@ -53,20 +67,42 @@ def show() -> None:
         "your actual bill. Cache reads are priced at ~0.1x, cache writes at ~1.25x."
     )
 
+    rate_in, rate_out = _tokens_last_minute(log)
+    r1, r2 = st.columns(2)
+    r1.metric("Input tokens / min (rolling)", f"{rate_in:,}")
+    r2.metric("Output tokens / min (rolling)", f"{rate_out:,}")
+    st.caption(
+        "Sum of the last 60 seconds of calls — for comparing against your org's "
+        "tokens-per-minute rate limit (Console → Settings → Rate Limits). At a "
+        "Build-tier org this is generally 5M input / 1M output TPM per model, so a "
+        "single-user session like this one is very unlikely to get close."
+    )
+
     st.divider()
 
-    st.subheader("By source")
+    st.subheader("By operation")
+    st.caption(
+        "Each source is a distinct call site: chat_turn (the main agent loop), "
+        "chat_subagent_categorize (the categorize_transaction delegated sub-agent "
+        "call), enrichment (merchant categorization on upload), and "
+        "dashboard_insight (the Dashboard's \"Generate Insights\" button)."
+    )
     import pandas as pd
 
     df = pd.DataFrame(log)
     df["est_cost"] = [round(_estimate_cost(e), 5) for e in log]
     by_source = (
-        df.groupby("source")[["input_tokens", "output_tokens", "cache_read_input_tokens", "est_cost"]]
-        .sum()
-        .rename(columns={"cache_read_input_tokens": "cache_read_tokens"})
+        df.groupby("source")
+        .agg(
+            calls=("input_tokens", "count"),
+            input_tokens=("input_tokens", "sum"),
+            output_tokens=("output_tokens", "sum"),
+            cache_read_tokens=("cache_read_input_tokens", "sum"),
+            est_cost=("est_cost", "sum"),
+        )
         .sort_values("est_cost", ascending=False)
     )
     st.dataframe(by_source, use_container_width=True)
 
-    with st.expander("All calls (most recent first)"):
+    with st.expander("All calls (most recent first, each row = one API request)"):
         st.dataframe(df.iloc[::-1], use_container_width=True)

@@ -83,7 +83,7 @@ def show() -> None:
         try:
             for event in run_turn(user_input, history, ledger, fts, api_key):
                 if event["type"] == "usage":
-                    log_usage("chat", event["model"], event["usage"])
+                    log_usage(event["source"], event["model"], event["usage"])
 
                 elif event["type"] == "text":
                     accumulated_text += event["text"]

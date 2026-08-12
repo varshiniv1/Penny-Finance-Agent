@@ -91,7 +91,7 @@ def run_turn(
       {"type": "code_execution", "block": {...}}
       {"type": "image",          "filename": "...", "image_bytes": b"..."}
       {"type": "file",           "filename": "...", "file_bytes": b"..."}
-      {"type": "usage",          "model": "...", "usage": ...}
+      {"type": "usage",          "source": "...", "model": "...", "usage": ...}
       {"type": "done"}
     """
     client = anthropic.Anthropic(api_key=api_key)
@@ -116,7 +116,7 @@ def run_turn(
             betas=["code-execution-2025-08-25", "skills-2025-10-02"],
             container={"skills": [{"type": "anthropic", "skill_id": "xlsx"}]},
         )
-        yield {"type": "usage", "model": model, "usage": response.usage}
+        yield {"type": "usage", "source": "chat_turn", "model": model, "usage": response.usage}
 
         # A single response can contain text AND multiple tool_use blocks —
         # collect them all before touching history, so the reconstructed
@@ -181,6 +181,7 @@ def run_turn(
                 if executor.last_subagent_usage is not None:
                     yield {
                         "type": "usage",
+                        "source": "chat_subagent_categorize",
                         "model": "claude-haiku-4-5-20251001",
                         "usage": executor.last_subagent_usage,
                     }

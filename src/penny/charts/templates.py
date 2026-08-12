@@ -74,7 +74,7 @@ def render_chart(
 def spending_by_category(ledger) -> go.Figure:
     rows = ledger.query(
         "SELECT category, SUM(amount) AS total FROM transactions "
-        "WHERE is_internal = false AND amount > 0 AND category IS NOT NULL "
+        "WHERE is_internal = false AND amount > 0 AND category IS NOT NULL AND category != '' "
         "GROUP BY category ORDER BY total DESC"
     )
     return render_chart("bar", rows, "Spending by Category", "category", "total")
@@ -101,7 +101,7 @@ def top_merchants(ledger, n: int = 10) -> go.Figure:
 def category_pie(ledger) -> go.Figure:
     rows = ledger.query(
         "SELECT category, SUM(amount) AS total FROM transactions "
-        "WHERE is_internal = false AND amount > 0 AND category IS NOT NULL "
+        "WHERE is_internal = false AND amount > 0 AND category IS NOT NULL AND category != '' "
         "GROUP BY category ORDER BY total DESC"
     )
     return render_chart("pie", rows, "Spending Breakdown", "category", "total")

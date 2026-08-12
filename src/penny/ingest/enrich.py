@@ -10,8 +10,15 @@ if TYPE_CHECKING:
 # ── Rule-based cleanup ────────────────────────────────────────────────────────
 
 _RULES: list[tuple[re.Pattern, str, str]] = [
-    (re.compile(r"^AMZN\s+Mktp", re.I),          "Amazon",           "Shopping"),
-    (re.compile(r"^Amazon\.com", re.I),            "Amazon",           "Shopping"),
+    # More specific Amazon rules first — order matters, first match wins.
+    (re.compile(r"AMAZON\s*PRIME", re.I),          "Amazon Prime",     "Subscriptions"),
+    (re.compile(r"AMAZON|AMZN",   re.I),           "Amazon",           "Shopping"),
+    (re.compile(r"COMCAST|XFINITY", re.I),         "Comcast",          "Utilities"),
+    (re.compile(r"DISCOVER\s*E-?Payment", re.I),   "Discover Card Payment", "Transfer"),
+    (re.compile(r"AMERICAN\s*EXPRESS|AMERICANEXPRESS", re.I), "American Express", "Transfer"),
+    (re.compile(r"MINT\s*MOBILE", re.I),           "Mint Mobile",      "Utilities"),
+    (re.compile(r"PLAYSTATION",  re.I),            "PlayStation Network", "Entertainment"),
+    (re.compile(r"GEICO",        re.I),            "Geico",            "Other"),
     (re.compile(r"^SQ\s*\*",     re.I),            None,               "Dining"),   # merchant kept as-is after SQ *
     (re.compile(r"^TST\*",       re.I),            None,               "Dining"),
     (re.compile(r"^SP\s*\*",     re.I),            None,               "Shopping"),

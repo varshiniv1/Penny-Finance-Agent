@@ -281,7 +281,10 @@ def _extract_amount(text: str) -> float | None:
     # number on the line, there's no balance column and it must be the amount.
     raw = hits[-2] if len(hits) >= 2 else hits[-1]
     try:
-        val = float(raw.replace(",", "").replace("$", ""))
+        # Statements print debits as negative and credits unsigned (or vice
+        # versa) — flip to this app's convention: positive = expense/debit,
+        # negative = credit/refund (see Transaction schema in agent/prompts.py).
+        val = -float(raw.replace(",", "").replace("$", ""))
         if re.search(r"\b(CR|credit|refund)\b", text, re.IGNORECASE):
             val = -abs(val)
         return val

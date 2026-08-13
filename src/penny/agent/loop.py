@@ -58,6 +58,11 @@ _EXPORT_INTENT_RE = re.compile(
 # fail closed instead of costing an unbounded number of API calls.
 _MAX_TOOL_ROUNDS = 20
 
+# Ceiling on extended-thinking tokens per API call — must stay below the
+# 4096 max_tokens above (the API rejects otherwise), leaving plenty of room
+# for the actual response afterward. A ceiling, not a fixed spend.
+_THINKING_BUDGET_TOKENS = 1024
+
 # Without this, `history` (and therefore the request body) grows for the
 # whole browser session — every turn resends the entire conversation,
 # including every past tool_result (a query_sql call alone can carry ~100
@@ -158,6 +163,7 @@ def run_turn(
     """
     Run one conversational turn, yielding events as they happen:
       {"type": "text",           "text": "..."}
+      {"type": "thinking",       "text": "..."}
       {"type": "tool_call",      "name": "...", "input": {...}}
       {"type": "tool_result",    "name": "...", "result": {...}}
       {"type": "op_result",      "name": "...", "text": "..."}
@@ -179,7 +185,15 @@ def run_turn(
     _trim_history(history)
     messages = list(history)
 
-    betas = ["code-execution-2025-08-25"]
+    # interleaved-thinking lets a "thinking" block appear before *each* tool
+    # call in a multi-round turn, not just once at the very start — verified
+    # live against claude-haiku-4-5-20251001, which does support extended
+    # thinking. budget_tokens is a ceiling, not something forced to be
+    # spent — real usage tends to land well under it for a question this
+    # size — but it does add real cost every round, billed as output
+    # tokens, since this is a genuine tradeoff (transparency into the
+    # model's reasoning vs. token cost), not a free win.
+    betas = ["code-execution-2025-08-25", "interleaved-thinking-2025-05-14"]
     extra: dict[str, Any] = {}
     if _EXPORT_INTENT_RE.search(user_message):
         betas.append("skills-2025-10-02")
@@ -197,6 +211,7 @@ def run_turn(
             tools=TOOL_SCHEMAS,
             messages=_with_cache_breakpoint(messages),
             betas=betas,
+            thinking={"type": "enabled", "budget_tokens": _THINKING_BUDGET_TOKENS},
             **extra,
         )
         yield {"type": "usage", "source": "chat_turn", "model": model, "usage": response.usage}
@@ -211,6 +226,13 @@ def run_turn(
             if block.type == "text":
                 yield {"type": "text", "text": block.text}
                 assistant_content.append({"type": "text", "text": block.text})
+
+            elif block.type == "thinking":
+                yield {"type": "thinking", "text": block.thinking}
+                # model_dump() (not a hand-built dict) so the signature field
+                # round-trips exactly as the API issued it — required for a
+                # continued conversation to remain valid.
+                assistant_content.append(block.model_dump())
 
             elif block.type == "tool_use":
                 assistant_content.append({

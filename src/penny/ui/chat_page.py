@@ -164,6 +164,9 @@ def _render_message(msg: dict, key: str) -> None:
         st.markdown(msg["content"])
     elif msg["type"] in ("op", "note"):
         st.caption(msg["content"])
+    elif msg["type"] == "thinking":
+        with st.expander("💭 Thinking", expanded=False):
+            st.caption(msg["content"])
     elif msg["type"] == "chart":
         st.plotly_chart(pio.from_json(msg["content"]))
     elif msg["type"] == "image":
@@ -392,6 +395,21 @@ def show() -> None:
                     # is known, and upgrades it then if so.
                     accumulated_text += event["text"]
                     text_placeholder.caption(_normalize_markdown(accumulated_text) + "▌")
+                    got_output = True
+
+                elif event["type"] == "thinking":
+                    # Arrives as one complete block per API round (this app
+                    # doesn't use token-streaming responses), same as every
+                    # other block type here — not a partial fragment to
+                    # accumulate. Collapsed by default so genuine reasoning
+                    # is available without dominating the chat the way a
+                    # multi-paragraph thinking trace would inline.
+                    _flush_text()
+                    thinking_text = _normalize_markdown(event["text"])
+                    with st.expander("💭 Thinking", expanded=False):
+                        st.caption(thinking_text)
+                    _append("assistant", "thinking", content=thinking_text)
+                    _new_placeholder()
                     got_output = True
 
                 elif event["type"] == "tool_call":

@@ -11,3 +11,11 @@ headless = true
 
 [browser]
 gatherUsageStats = false
+
+# Hides Streamlit's developer toolbar (Clear cache, Rerun, Deploy, ...) and —
+# more importantly — the keyboard shortcuts tied to it. "C" alone triggers
+# Clear Cache in dev mode, and Streamlit's listener doesn't check for a Ctrl
+# modifier, so Ctrl+C (meant as copy) was firing it too. End users of a
+# deployed financial app have no reason to see dev tooling anyway.
+[client]
+toolbarMode = "viewer"

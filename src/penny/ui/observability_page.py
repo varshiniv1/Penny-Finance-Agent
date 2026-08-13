@@ -59,12 +59,14 @@ def show(user_key: str) -> None:
     total_cache_read = sum(e["cache_read_input_tokens"] for e in log)
     total_cost = sum(_estimate_cost(e) for e in log)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Input tokens", f"{total_input:,}")
-    c2.metric("Output tokens", f"{total_output:,}")
-    c3.metric("Cache read tokens", f"{total_cache_read:,}")
-    c4.metric("Cache write tokens", f"{total_cache_write:,}")
-    c5.metric("Est. cost", f"${total_cost:,.4f}")
+    # Stacked vertically, not in st.columns — this page renders inside the
+    # narrow sidebar expander now, where a row of 5 metrics truncates every
+    # label and number into an unreadable sliver.
+    st.metric("Input tokens", f"{total_input:,}")
+    st.metric("Output tokens", f"{total_output:,}")
+    st.metric("Cache read tokens", f"{total_cache_read:,}")
+    st.metric("Cache write tokens", f"{total_cache_write:,}")
+    st.metric("Est. cost", f"${total_cost:,.4f}")
 
     st.caption(
         "Estimated cost is a rough guide based on published per-model rates — it's not "
@@ -72,9 +74,8 @@ def show(user_key: str) -> None:
     )
 
     rate_in, rate_out = _tokens_last_minute(log)
-    r1, r2 = st.columns(2)
-    r1.metric("Input tokens / min (rolling)", f"{rate_in:,}")
-    r2.metric("Output tokens / min (rolling)", f"{rate_out:,}")
+    st.metric("Input tokens / min (rolling)", f"{rate_in:,}")
+    st.metric("Output tokens / min (rolling)", f"{rate_out:,}")
     st.caption(
         "Sum of the last 60 seconds of calls — for comparing against your org's "
         "tokens-per-minute rate limit (Console → Settings → Rate Limits). At a "
@@ -106,7 +107,7 @@ def show(user_key: str) -> None:
         )
         .sort_values("est_cost", ascending=False)
     )
-    st.dataframe(by_source, use_container_width=True)
+    st.dataframe(by_source, width="stretch")
 
     with st.expander("All calls (most recent first, each row = one API request)"):
-        st.dataframe(df.iloc[::-1], use_container_width=True)
+        st.dataframe(df.iloc[::-1], width="stretch")

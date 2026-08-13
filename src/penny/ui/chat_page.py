@@ -137,7 +137,7 @@ def _render_message(msg: dict, key: str) -> None:
     elif msg["type"] == "op":
         st.caption(msg["content"])
     elif msg["type"] == "chart":
-        st.plotly_chart(pio.from_json(msg["content"]), use_container_width=True)
+        st.plotly_chart(pio.from_json(msg["content"]))
     elif msg["type"] == "image":
         st.image(msg["content"])
     elif msg["type"] == "file":
@@ -350,7 +350,7 @@ def show() -> None:
                 elif event["type"] == "chart":
                     _flush_text()
                     fig = pio.from_json(event["chart_json"])
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig)
                     _append("assistant", "chart", content=event["chart_json"])
                     got_output = True
 

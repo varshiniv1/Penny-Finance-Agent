@@ -254,6 +254,44 @@ def test_delete_upload_is_scoped_per_user(shared_db):
     assert b.count() == 1  # user_b's identical-hash upload is untouched
 
 
+# ── Per-upload rename ────────────────────────────────────────────────────────
+
+def test_rename_upload_updates_upload_history(ledger):
+    _seed_two_uploads(ledger)
+    n = ledger.rename_upload("hash_a", "January Chase Statement.pdf")
+    assert n == 2
+    uploads = {u["content_hash"]: u["filename"] for u in ledger.list_uploads()}
+    assert uploads["hash_a"] == "January Chase Statement.pdf"
+    assert uploads["hash_b"] == "fileB.pdf"  # untouched
+
+
+def test_rename_upload_updates_transaction_source_file(ledger):
+    _seed_two_uploads(ledger)
+    ledger.rename_upload("hash_a", "January Chase Statement.pdf")
+    rows = ledger.query("SELECT id, source_file FROM transactions ORDER BY id")
+    by_id = {r["id"]: r["source_file"] for r in rows}
+    assert by_id["fa-1"] == "January Chase Statement.pdf"
+    assert by_id["fa-2"] == "January Chase Statement.pdf"
+    assert by_id["fb-1"] == "fileB.pdf"  # different upload, untouched
+
+
+def test_rename_upload_is_scoped_per_user(shared_db):
+    a = Ledger(shared_db.cursor(), "user_a")
+    b = Ledger(shared_db.cursor(), "user_b")
+    for l in (a, b):
+        l.upsert([
+            {"id": f"{l.user_id}-1", "date": "2024-01-05", "description": "Coffee",
+             "amount": 5.0, "source_file": "statement.pdf", "content_hash": "same_hash"},
+        ])
+        l.mark_uploaded("same_hash", "statement.pdf", "2024-01-05", "2024-01-05", 1)
+
+    a.rename_upload("same_hash", "Renamed by A.pdf")
+    a_name = next(u["filename"] for u in a.list_uploads() if u["content_hash"] == "same_hash")
+    b_name = next(u["filename"] for u in b.list_uploads() if u["content_hash"] == "same_hash")
+    assert a_name == "Renamed by A.pdf"
+    assert b_name == "statement.pdf"  # user_b's record is untouched
+
+
 # ── Usage log (self-service, no admin gate) ─────────────────────────────────
 
 _USAGE_ENTRY = {

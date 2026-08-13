@@ -77,21 +77,37 @@ with st.sidebar:
             chat_page.process_uploads(uploads, api_key)
             st.rerun()
 
-    with st.expander("🗑️ Delete my data"):
+    with st.expander("📂 Manage uploads"):
         uploads = chat_page.list_uploads()
         if uploads:
-            st.caption("Remove one statement:")
+            st.caption("Rename or remove a statement:")
             for u in uploads:
                 date_range = (
                     f"{u['min_date']} – {u['max_date']}" if u["min_date"] else "no dated rows"
                 )
-                col1, col2 = st.columns([4, 1])
-                col1.markdown(f"**{u['filename']}**  \n{u['row_count']} rows, {date_range}")
-                if col2.button("Delete", key=f"del_upload_{u['content_hash']}"):
+                st.markdown(f"**{u['filename']}**  \n{u['row_count']} rows, {date_range}")
+                name_col, rename_col, delete_col = st.columns([3, 1, 1])
+                new_name = name_col.text_input(
+                    "New name",
+                    value=u["filename"],
+                    key=f"rename_input_{u['content_hash']}",
+                    label_visibility="collapsed",
+                )
+                if rename_col.button("Rename", key=f"rename_btn_{u['content_hash']}"):
+                    cleaned = new_name.strip()
+                    if not cleaned:
+                        st.error("Name can't be empty.")
+                    elif cleaned == u["filename"]:
+                        st.info("That's already the name.")
+                    else:
+                        chat_page.rename_upload(u["content_hash"], cleaned)
+                        st.success(f"Renamed to {cleaned}.")
+                        st.rerun()
+                if delete_col.button("Delete", key=f"del_upload_{u['content_hash']}"):
                     n = chat_page.delete_upload(u["content_hash"])
                     st.success(f"Removed {n} transaction(s) from {u['filename']}.")
                     st.rerun()
-            st.divider()
+                st.divider()
 
         st.caption("Or permanently remove everything saved under this API key.")
         if st.button("Delete all my saved data"):

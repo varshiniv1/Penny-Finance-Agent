@@ -269,6 +269,28 @@ class Ledger:
             [self.user_id, content_hash, filename, min_date, max_date, row_count],
         )
 
+    def rename_upload(self, content_hash: str, new_filename: str) -> int:
+        """Rename one prior upload — updates both the uploaded_statements
+        record (what the "Delete my data" list shows) and source_file on
+        every transaction from that upload (what the agent cites back to the
+        user, e.g. "from your Chase statement, page 3" — stale source_file
+        after a rename would make that citation lie). Scoped by content_hash,
+        not the old filename, for the same reason as delete_upload. Returns
+        the number of transactions updated."""
+        n = self._con.execute(
+            "SELECT COUNT(*) FROM _transactions WHERE user_id = ? AND content_hash = ?",
+            [self.user_id, content_hash],
+        ).fetchone()[0]
+        self._con.execute(
+            "UPDATE _transactions SET source_file = ? WHERE user_id = ? AND content_hash = ?",
+            [new_filename, self.user_id, content_hash],
+        )
+        self._con.execute(
+            "UPDATE uploaded_statements SET filename = ? WHERE user_id = ? AND content_hash = ?",
+            [new_filename, self.user_id, content_hash],
+        )
+        return n
+
     def list_uploads(self) -> list[dict]:
         """This user's accepted uploads, most recent first — powers the
         per-file delete UI."""

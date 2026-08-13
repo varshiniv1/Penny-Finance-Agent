@@ -289,6 +289,13 @@ def delete_upload(content_hash: str) -> int:
     return n
 
 
+def rename_upload(content_hash: str, new_filename: str) -> int:
+    """Rename one prior upload — no FTS reindex needed, since source_file
+    isn't one of the indexed columns (description/merchant/category only).
+    Returns the number of transactions updated."""
+    return get_ledger(get_user_key()).rename_upload(content_hash, new_filename)
+
+
 def show() -> None:
     user_key = get_user_key()
 

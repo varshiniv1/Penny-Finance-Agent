@@ -160,7 +160,7 @@ def run_turn(
       {"type": "text",           "text": "..."}
       {"type": "tool_call",      "name": "...", "input": {...}}
       {"type": "tool_result",    "name": "...", "result": {...}}
-      {"type": "op_result",      "text": "..."}
+      {"type": "op_result",      "name": "...", "text": "..."}
       {"type": "chart",          "chart_json": "..."}
       {"type": "sql",            "sql": "..."}
       {"type": "code_execution", "block": {...}}
@@ -235,7 +235,10 @@ def run_turn(
                     # so it shows up as an operation indicator in the UI too.
                     yield {"type": "tool_call", "name": block.name, "input": block.input}
                 if block.type == "bash_code_execution_tool_result":
-                    yield {"type": "op_result", "text": _summarize_code_execution_result(block)}
+                    yield {
+                        "type": "op_result", "name": "code_execution",
+                        "text": _summarize_code_execution_result(block),
+                    }
                     yield {"type": "code_execution", "block": block_dict}
                     yield from _emit_code_execution_files(client, block)
                 if block.type == "web_search_tool_result":
@@ -243,7 +246,10 @@ def run_turn(
                     # assistant_content.append() above with no UI event at
                     # all — a web_search call's invocation showed up (via the
                     # server_tool_use branch), but never its outcome.
-                    yield {"type": "op_result", "text": _summarize_web_search_result(block)}
+                    yield {
+                        "type": "op_result", "name": "web_search",
+                        "text": _summarize_web_search_result(block),
+                    }
 
         history.append({"role": "assistant", "content": assistant_content})
         messages.append({"role": "assistant", "content": assistant_content})

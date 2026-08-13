@@ -100,23 +100,51 @@ def _normalize_markdown(text: str) -> str:
 
 
 def _describe_tool_call(name: str, tool_input: dict) -> str:
-    """Short, human-readable label for a tool call — shown in light/muted text,
-    like Claude Code's own operation indicators. Deliberately never includes the
-    raw SQL or full query text (chat stays free of implementation detail)."""
+    """Human-readable label for a tool call — shown in light/muted text, like
+    Claude Code's own operation indicators. Prefixed with the raw tool name
+    (in backticks) so it's visible which underlying function actually ran —
+    useful for anyone reading the trace to learn how the agent works, not
+    just what it did. Deliberately never includes the raw SQL or full query
+    text (chat stays free of implementation detail)."""
     if name == "query_sql":
-        return "Queried your transactions"
-    if name == "search_text":
-        return f'Searched for "{tool_input.get("query", "")}"'
-    if name == "generate_chart":
-        return f'Built a {tool_input.get("chart_type", "")} chart'
-    if name == "categorize_transaction":
+        desc = "Queried your transactions"
+    elif name == "search_text":
+        desc = f'Searched for "{tool_input.get("query", "")}"'
+    elif name == "generate_chart":
+        desc = f'Built a {tool_input.get("chart_type", "")} chart'
+    elif name == "categorize_transaction":
         descriptor = str(tool_input.get("descriptor", ""))[:40]
-        return f'Looked up "{descriptor}"'
-    if name == "web_search":
-        return f'Searched the web for "{tool_input.get("query", "")}"'
-    if name == "code_execution":
-        return "Ran code"
-    return f"Ran {name}"
+        desc = f'Looked up "{descriptor}"'
+    elif name == "web_search":
+        desc = f'Searched the web for "{tool_input.get("query", "")}"'
+    elif name == "code_execution":
+        desc = "Ran code"
+    else:
+        desc = "Ran"
+    return f"`{name}` — {desc}"
+
+
+def _summarize_tool_result(name: str, result: dict) -> str | None:
+    """One-line outcome for a client-side tool call (query_sql, search_text,
+    categorize_transaction), shown muted right after its invocation label —
+    the "results" half of the trace, same spirit as op_result for
+    web_search/code_execution. Returns None when nothing needs its own
+    caption: generate_chart's success case renders the chart itself as the
+    visible confirmation, so a redundant text line would just be noise."""
+    if "error" in result:
+        return f"Failed: {result['error']}"
+    if name == "query_sql":
+        n = result.get("count", 0)
+        note = " (truncated)" if result.get("truncated") else ""
+        return f"Found {n} row{'s' if n != 1 else ''}{note}"
+    if name == "search_text":
+        n = result.get("count", 0)
+        return f"Found {n} match{'es' if n != 1 else ''}"
+    if name == "categorize_transaction":
+        merchant = result.get("merchant", "")
+        category = result.get("category", "")
+        return f"Categorized as {merchant} ({category})" if merchant else None
+    return None
 
 
 def _append(role: str, type_: str, **fields) -> None:
@@ -374,6 +402,23 @@ def show() -> None:
                     _new_placeholder()
                     got_output = True
 
+                elif event["type"] == "tool_result":
+                    # The "results" half of the trace for client-side tools
+                    # (query_sql, search_text, categorize_transaction) — the
+                    # same idea as op_result below, just for the tools this
+                    # app executes itself rather than Anthropic's server-side
+                    # ones. generate_chart intentionally returns no caption
+                    # here (see _summarize_tool_result) since the chart event
+                    # right after this one already renders the confirmation.
+                    summary = _summarize_tool_result(event["name"], event["result"])
+                    if summary:
+                        _flush_text()
+                        label = f"`{event['name']}` — {summary}"
+                        st.caption(label)
+                        _append("assistant", "op", content=label)
+                        _new_placeholder()
+                        got_output = True
+
                 elif event["type"] == "op_result":
                     # Completes a web_search/code_execution call announced by
                     # the "tool_call" branch above — e.g. "Found 5 results"
@@ -381,8 +426,9 @@ def show() -> None:
                     # no event at all for web_search, and no *handler* for
                     # code_execution even though loop.py already yielded one.
                     _flush_text()
-                    st.caption(event["text"])
-                    _append("assistant", "op", content=event["text"])
+                    label = f"`{event['name']}` — {event['text']}"
+                    st.caption(label)
+                    _append("assistant", "op", content=label)
                     _new_placeholder()
                     got_output = True
 

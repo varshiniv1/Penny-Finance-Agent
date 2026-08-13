@@ -1,18 +1,26 @@
-"""Penny as an MCP server: query and search your own exported transaction data
-from any MCP client (Claude Desktop, Claude Code, etc.), not just the Streamlit app.
+"""Penny as an MCP server: query and search your OWN live transaction data
+from any MCP client (Claude Desktop, Claude Code, etc.), not just the
+Streamlit app itself.
 
-This is read-only over a snapshot you explicitly exported — nothing here talks
-to a running Streamlit session, and no data is written back. Matches Penny's
-existing "nothing persists automatically" privacy model: you choose to export,
-you choose to point this at that file.
+Connects directly to the same persistent MotherDuck database the web app
+uses, scoped to your account the exact same way the web app scopes it —
+by hashing your Anthropic API key (see penny/identity.py, shared by both
+entry points so the two can never drift apart). No export step, no
+staleness: whatever's in the Streamlit app right now is what this server
+sees too, live, because it's the same underlying data.
 
 Run standalone:
-    python mcp_server.py path/to/penny_data.parquet
-    # or: set PENNY_DATA_PATH and omit the argument
+    python mcp_server.py <your-anthropic-api-key>
+    # or: set PENNY_API_KEY and omit the argument
 
-Get a Parquet file via the "Export transactions (Parquet)" button in the
-app's sidebar "Session data" section. See README.md for wiring this into
-claude_desktop_config.json.
+Also needs a MotherDuck token — the same one the web app uses — as either
+MOTHERDUCK_TOKEN or motherduck_token in the environment.
+
+Prefer the environment variable over the command-line argument where you
+can: a key passed as a CLI arg can end up in shell history or a process
+list, which the API key deserves better than.
+
+See README.md for wiring this into claude_desktop_config.json.
 """
 from __future__ import annotations
 
@@ -25,38 +33,50 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from mcp.server.mcpserver import MCPServer
 
+from penny.identity import ensure_motherduck_token, hash_api_key
 from penny.storage.fts import FTSIndex
 from penny.storage.ledger import Ledger
 
 mcp = MCPServer(
     name="penny-finance",
     instructions=(
-        "Query and search a personal finance transaction ledger exported from the "
-        "Penny app. Schema: transactions(id, date, description, merchant, category, "
-        "amount, account, account_last4, source_file, page_num, is_transfer, "
-        "is_refund, is_internal). amount sign convention: positive = expense/debit, "
-        "negative = credit/refund/income. Exclude internal transfers from spending "
-        "totals unless asked about them: add WHERE is_internal = false."
+        "Query and search a personal finance transaction ledger — the same "
+        "live data as the Penny web app, not a snapshot. Schema: "
+        "transactions(id, date, description, merchant, category, amount, "
+        "account, account_last4, source_file, page_num, is_transfer, "
+        "is_refund, is_internal). amount sign convention: positive = "
+        "expense/debit, negative = credit/refund/income. Exclude transfers "
+        "from spending totals unless asked about them: add "
+        "WHERE is_internal = false AND category != 'Transfer' — is_internal "
+        "alone often isn't enough, since it's only set when a matching "
+        "transaction was found on another uploaded account."
     ),
 )
 
-_ledger = Ledger(":memory:")
-_fts = FTSIndex(":memory:")
+_ledger: Ledger | None = None
+_fts: FTSIndex | None = None
 
 
-def _load(data_path: str) -> None:
-    _ledger.import_parquet(Path(data_path))
-    # limit set well above any realistic transaction count so a large
-    # snapshot doesn't get silently truncated when building the search index.
-    rows = _ledger.query(
-        "SELECT id, description, merchant, category FROM transactions", limit=1_000_000
-    )
-    _fts.index(rows)
+def _connect(api_key: str) -> None:
+    global _ledger, _fts
+    token = os.environ.get("MOTHERDUCK_TOKEN") or os.environ.get("motherduck_token", "")
+    if not token:
+        print(
+            "MOTHERDUCK_TOKEN (or motherduck_token) must be set in the environment — "
+            "the same token the web app uses.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    ensure_motherduck_token(token)
+
+    user_id = hash_api_key(api_key)
+    _ledger = Ledger("md:penny", user_id)
+    _fts = FTSIndex(_ledger._con, user_id)
 
 
 @mcp.tool(description="Run a read-only SQL SELECT query against the transactions table.")
 def query_transactions(sql: str) -> list[dict[str, Any]]:
-    """Run a DuckDB SELECT query against the loaded transaction snapshot.
+    """Run a DuckDB SELECT query against your live transaction data.
 
     Args:
         sql: A valid DuckDB SELECT statement over the `transactions` table.
@@ -76,12 +96,12 @@ def search_transactions(query: str, top_k: int = 20) -> list[dict[str, Any]]:
 
 
 def main() -> None:
-    data_path = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PENNY_DATA_PATH")
-    if not data_path:
-        print("Usage: python mcp_server.py <path-to-exported-parquet>", file=sys.stderr)
-        print("(or set the PENNY_DATA_PATH environment variable)", file=sys.stderr)
+    api_key = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PENNY_API_KEY")
+    if not api_key:
+        print("Usage: python mcp_server.py <your-anthropic-api-key>", file=sys.stderr)
+        print("(or set the PENNY_API_KEY environment variable — preferred)", file=sys.stderr)
         sys.exit(1)
-    _load(data_path)
+    _connect(api_key)
     mcp.run(transport="stdio")
 
 

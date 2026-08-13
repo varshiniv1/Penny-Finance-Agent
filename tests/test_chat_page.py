@@ -1,6 +1,6 @@
-"""Tests for the chat page's Markdown normalization — pure function, no
-Streamlit runtime needed."""
-from penny.ui.chat_page import _normalize_markdown
+"""Tests for the chat page's Markdown normalization and upload-coverage
+labeling — both pure functions, no Streamlit runtime needed."""
+from penny.ui.chat_page import _coverage_label, _normalize_markdown
 
 
 def test_downgrades_h1_heading_to_bold():
@@ -50,3 +50,39 @@ def test_heading_and_dollar_together():
 def test_plain_text_unaffected():
     text = "Nothing special here, just a normal sentence."
     assert _normalize_markdown(text) == text
+
+
+# ── Month/year coverage labeling ────────────────────────────────────────────
+
+def test_single_file_single_month():
+    assert _coverage_label([("2026-01-05", "2026-01-28")]) == "Jan 2026"
+
+
+def test_single_file_contiguous_span():
+    assert _coverage_label([("2026-01-05", "2026-04-28")]) == "Jan 2026 – Apr 2026"
+
+
+def test_multiple_files_combine_into_one_contiguous_span():
+    # Two statements, back to back — Jan and Feb — should read as one span.
+    ranges = [("2026-01-05", "2026-01-31"), ("2026-02-01", "2026-02-28")]
+    assert _coverage_label(ranges) == "Jan 2026 – Feb 2026"
+
+
+def test_gap_is_not_reported_as_continuous():
+    # Jan and Apr, nothing in between — must not claim "Jan 2026 – Apr 2026".
+    ranges = [("2026-01-05", "2026-01-31"), ("2026-04-01", "2026-04-30")]
+    result = _coverage_label(ranges)
+    assert result != "Jan 2026 – Apr 2026"
+    assert "Jan 2026" in result and "Apr 2026" in result
+
+
+def test_year_boundary_is_handled():
+    assert _coverage_label([("2025-12-01", "2026-01-31")]) == "Dec 2025 – Jan 2026"
+
+
+def test_empty_input_returns_empty_string():
+    assert _coverage_label([]) == ""
+
+
+def test_rows_with_missing_dates_are_skipped():
+    assert _coverage_label([(None, None), ("2026-01-05", "2026-01-28")]) == "Jan 2026"

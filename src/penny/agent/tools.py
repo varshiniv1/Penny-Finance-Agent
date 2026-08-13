@@ -1,7 +1,6 @@
 """Tool definitions and implementations for the Penny agent."""
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -156,8 +155,6 @@ class ToolExecutor:
     def _query_sql(self, sql: str) -> dict:
         try:
             rows = self.ledger.query(sql, limit=self._SQL_ROW_CAP)
-            q_hash = hashlib.sha1(sql.encode()).hexdigest()[:12]
-            self.ledger.cache_query(q_hash, sql)
             return {
                 "rows": rows,
                 "count": len(rows),

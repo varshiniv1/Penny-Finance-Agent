@@ -3,8 +3,6 @@
 Entry point for Streamlit Community Cloud.
 Run locally:  streamlit run streamlit_app.py
 """
-import hmac
-import os
 import sys
 from pathlib import Path
 
@@ -13,21 +11,6 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 import streamlit as st
 
-
-def _is_admin() -> bool:
-    """Observability is owner-only: visible only with ?admin=<PENNY_ADMIN_TOKEN>
-    matching a secret configured out-of-band (Streamlit secrets or an env var),
-    never checked into the repo. No secret configured -> tab never appears."""
-    try:
-        secret = st.secrets.get("PENNY_ADMIN_TOKEN", "")
-    except Exception:
-        secret = ""
-    secret = secret or os.environ.get("PENNY_ADMIN_TOKEN", "")
-    if not secret:
-        return False
-    given = st.query_params.get("admin", "")
-    return hmac.compare_digest(given, secret)
-
 st.set_page_config(
     page_title="Penny — Personal Finance Agent",
     page_icon="💰",
@@ -35,8 +18,28 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Streamlit's default chat text is smaller than comfortable reading size — bump
+# font-size/line-height only, leaving color/theme entirely to .streamlit/config.toml.
+st.markdown(
+    """
+    <style>
+    [data-testid="stChatMessageContent"] p,
+    [data-testid="stChatMessageContent"] li,
+    [data-testid="stChatMessageContent"] span {
+        font-size: 1.05rem;
+        line-height: 1.6;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 from penny.ui import chat_page, observability_page
-from penny.ui.session import get_fts, get_ledger, tx_count
+from penny.ui.session import (
+    delete_all_user_data, get_display_label, get_ledger, get_user_key, tx_count,
+)
+
+_FILE_TYPES = ["pdf", "csv", "jpg", "jpeg", "png", "tiff", "tif", "bmp"]
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -49,18 +52,41 @@ with st.sidebar:
         "Anthropic API Key",
         type="password",
         placeholder="sk-ant-...",
-        help="Required for the chat agent and merchant enrichment. Never stored.",
+        help="Required for the chat agent and merchant enrichment, and used to "
+        "identify your saved data (a one-way hash of it, never the key itself).",
     )
     if api_key:
         st.session_state["api_key"] = api_key
     elif "api_key" not in st.session_state:
         st.session_state["api_key"] = ""
 
+    user_key = get_user_key()
+    display_label = get_display_label()
+    if display_label:
+        st.caption(f"Signed in as ••••{display_label}")
+
     st.divider()
 
-    with st.expander("💾 Session data"):
-        st.caption("Your data lives only in this browser session. Export it to restore later.")
-        if tx_count() > 0:
+    with st.expander("📎 Upload statements"):
+        st.caption("Supports PDF (text or scanned), CSV, and image statements.")
+        uploads = st.file_uploader(
+            "Add bank or credit card statements",
+            type=_FILE_TYPES,
+            accept_multiple_files=True,
+            key="statement_uploader",
+        )
+        if uploads and st.button("Process statements", type="primary"):
+            chat_page.process_uploads(uploads, api_key)
+            st.rerun()
+
+    with st.expander("💾 Export data"):
+        st.caption(
+            "Your transactions are saved automatically and are here next time you "
+            "sign in with the same API key — no need to restore a backup. Export a "
+            "Parquet snapshot if you want an offline copy, or to query your data "
+            "from an MCP client like Claude Desktop (see README)."
+        )
+        if tx_count(user_key) > 0:
             if st.button("Export transactions (Parquet)"):
                 import tempfile, pathlib
                 from datetime import datetime, timezone
@@ -68,7 +94,7 @@ with st.sidebar:
                 with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
                     tmp_path = pathlib.Path(tmp.name)
                 try:
-                    get_ledger().export_parquet(tmp_path)
+                    get_ledger(user_key).export_parquet(tmp_path)
                     # Timestamped so re-exporting later the same day (or a
                     # different session) never silently overwrites an earlier
                     # download sitting in the same Downloads folder.
@@ -85,46 +111,23 @@ with st.sidebar:
                     )
                 finally:
                     tmp_path.unlink(missing_ok=True)
-        restore = st.file_uploader("Restore from Parquet backup", type=["parquet"], key="restore")
-        if restore and st.button("Restore"):
-            import tempfile, pathlib
-            with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-                tmp.write(restore.read())
-                tmp_path = pathlib.Path(tmp.name)
-            try:
-                ledger = get_ledger()
-                n = ledger.import_parquet(tmp_path)
-                # import_parquet only touches the ledger — the FTS index needs
-                # the same rows explicitly, or restored transactions become
-                # invisible to search_text without any error to surface it.
-                # limit set well above any realistic transaction count so a
-                # large backup doesn't get silently truncated on reindex.
-                rows = ledger.query(
-                    "SELECT id, description, merchant, category FROM transactions",
-                    limit=1_000_000,
-                )
-                get_fts().index(rows)
-                st.success(f"Restored. Total transactions: {n}")
-            finally:
-                tmp_path.unlink(missing_ok=True)
 
-    if _is_admin():
         st.divider()
-        page = st.radio(
-            "Navigate", ["Chat with Penny", "Observability"], label_visibility="collapsed"
-        )
-    else:
-        page = "Chat with Penny"
+        st.caption("Permanently remove everything saved under this API key.")
+        if st.button("🗑️ Delete all my saved data"):
+            delete_all_user_data(user_key)
+            st.success("Deleted. Your saved transactions are gone.")
+            st.rerun()
+
+    with st.expander("📊 Your usage"):
+        observability_page.show(user_key)
 
     st.divider()
     st.caption(
-        "All processing happens in your browser session. "
-        "Raw PDFs never leave your device. "
-        "Only query results are sent to the Claude API."
+        "Raw statement files are discarded right after parsing — only the extracted "
+        "transactions are saved, tied to a one-way hash of your API key so they're "
+        "here again next time. Delete them any time above."
     )
 
-# ── Page routing ──────────────────────────────────────────────────────────────
-if page == "Observability":
-    observability_page.show()
-else:
-    chat_page.show()
+# ── Main content ─────────────────────────────────────────────────────────────
+chat_page.show()

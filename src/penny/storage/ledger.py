@@ -1,8 +1,18 @@
 """DuckDB transaction ledger.
 
-Supports two modes:
-  - file mode  : duckdb.connect("data/penny.duckdb")  — persistent local use
-  - memory mode: duckdb.connect(":memory:")            — Streamlit Cloud sessions
+Backed by MotherDuck (a hosted DuckDB database, shared across all of Penny's users)
+so transaction data survives across browser sessions and Streamlit Cloud restarts,
+instead of vanishing when the tab closes. Falls back to a local `:memory:` connection
+when no MotherDuck token is configured, or no user identity exists yet (no API key
+entered) — same ephemeral behavior the app has always had in that case.
+
+Multi-tenancy without per-row SQL rewriting: the physical table (`_transactions`) holds
+every user's rows together, but `Ledger.__init__` creates a connection-local TEMP VIEW
+named `transactions` that's pre-filtered to just this connection's `user_id`. Every
+query this class runs — including arbitrary SQL the LLM writes via the query_sql tool —
+references `transactions` and is therefore automatically scoped, with no SQL parsing
+or rewriting needed. Verified empirically: the view doesn't leak across connections,
+and aggregates (SUM, COUNT, ...) over it are correctly pre-filtered.
 """
 from __future__ import annotations
 
@@ -26,8 +36,9 @@ _SQL_DISALLOWED_RE = re.compile(
 )
 
 _DDL = """
-CREATE TABLE IF NOT EXISTS transactions (
-    id            VARCHAR PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS _transactions (
+    id            VARCHAR NOT NULL,
+    user_id       VARCHAR NOT NULL,
     date          DATE    NOT NULL,
     description   VARCHAR NOT NULL,
     merchant      VARCHAR,
@@ -39,38 +50,90 @@ CREATE TABLE IF NOT EXISTS transactions (
     page_num      INTEGER,
     is_transfer   BOOLEAN DEFAULT false,
     is_refund     BOOLEAN DEFAULT false,
-    is_internal   BOOLEAN DEFAULT false
+    is_internal   BOOLEAN DEFAULT false,
+    PRIMARY KEY (id)
 );
 
+-- Shared/global across every user, deliberately not partitioned by user_id: a
+-- descriptor like "STARBUCKS #1234" maps to the same merchant/category regardless
+-- of whose statement it came from, so caching it globally avoids redundant Claude
+-- calls across users with no personal-data exposure (only business names/categories
+-- ever live here).
 CREATE TABLE IF NOT EXISTS merchant_cache (
     descriptor  VARCHAR PRIMARY KEY,
     merchant    VARCHAR,
     category    VARCHAR
 );
 
-CREATE TABLE IF NOT EXISTS query_cache (
-    question_hash VARCHAR PRIMARY KEY,
-    sql           VARCHAR,
-    last_used     TIMESTAMP DEFAULT current_timestamp
+-- One row per accepted upload — powers duplicate-upload rejection (match on
+-- content_hash) and the month/year coverage label shown after a batch upload.
+CREATE TABLE IF NOT EXISTS uploaded_statements (
+    user_id      VARCHAR NOT NULL,
+    content_hash VARCHAR NOT NULL,
+    filename     VARCHAR,
+    uploaded_at  TIMESTAMP DEFAULT current_timestamp,
+    min_date     DATE,
+    max_date     DATE,
+    row_count    INTEGER,
+    PRIMARY KEY (user_id, content_hash)
+);
+
+-- Every Claude API call this user's session has made, for the self-service
+-- usage view (no admin gate — a user only ever reads their own rows here).
+-- Durable and genuinely unrestricted in row count: unlike the old session-only
+-- list this replaces, this survives a restart/redeploy, and there's no cap.
+CREATE TABLE IF NOT EXISTS usage_log (
+    user_id                     VARCHAR NOT NULL,
+    -- Stored as the raw ISO-8601 string (always UTC, from
+    -- datetime.now(timezone.utc).isoformat()) rather than a TIMESTAMP column —
+    -- DuckDB's plain TIMESTAMP type drops timezone info on round-trip, which
+    -- silently turned every read-back timestamp naive and broke comparisons
+    -- against datetime.now(timezone.utc) elsewhere. A string sidesteps that
+    -- entirely and needs no conversion on the way back out.
+    timestamp                   VARCHAR NOT NULL,
+    source                      VARCHAR,
+    model                       VARCHAR,
+    input_tokens                INTEGER,
+    output_tokens               INTEGER,
+    cache_creation_input_tokens INTEGER,
+    cache_read_input_tokens     INTEGER
 );
 """
 
 
-def _escape_sql_literal(path: Path) -> str:
-    """Escape a path for embedding in a single-quoted SQL string literal.
-    These paths are always our own tempfiles, never user-controlled, but this
-    keeps the query from breaking (or worse) if one ever contains a quote."""
-    return str(path).replace("'", "''")
+def _escape_sql_literal(value: str) -> str:
+    """Escape a value for embedding in a single-quoted SQL string literal."""
+    return str(value).replace("'", "''")
 
 
 class Ledger:
-    """Thin wrapper around a DuckDB connection with schema auto-init."""
+    """Thin wrapper around a DuckDB connection, scoped to one user_id.
 
-    def __init__(self, path: str | Path = ":memory:"):
-        if str(path) != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._con = duckdb.connect(str(path))
+    `connection_string` is either a MotherDuck database (e.g. "md:penny") or
+    ":memory:" for the no-persistence fallback. `user_id` is the SHA-256-derived
+    key from session.get_user_key() — never the raw API key.
+    """
+
+    def __init__(self, connection: "str | duckdb.DuckDBPyConnection", user_id: str):
+        self.user_id = user_id
+        # Accepts either a connection string (":memory:" or "md:penny") to open
+        # fresh, or an already-open connection to share — the latter is what
+        # makes it possible to test cross-user isolation locally without a live
+        # MotherDuck token: two Ledgers sharing one :memory: connection behave
+        # exactly like two users sharing one MotherDuck database, since separate
+        # `duckdb.connect(":memory:")` calls are otherwise fully independent,
+        # unshared databases.
+        self._con = duckdb.connect(connection) if isinstance(connection, str) else connection
         self._con.execute(_DDL)
+        # Connection-local — never visible to any other connection, including
+        # another browser tab/session for the same user (verified empirically).
+        # DDL can't be parameterized in DuckDB ("Unexpected prepared parameter"),
+        # so user_id is inlined here — safe because it's our own hex-digest
+        # string (see session.get_user_key()), never attacker-controlled input.
+        self._con.execute(
+            "CREATE OR REPLACE TEMP VIEW transactions AS "
+            f"SELECT * FROM _transactions WHERE user_id = '{_escape_sql_literal(user_id)}'"
+        )
 
     # ── transactions ─────────────────────────────────────────────────────────
 
@@ -79,14 +142,14 @@ class Ledger:
             return 0
         self._con.executemany(
             """
-            INSERT OR REPLACE INTO transactions
-              (id, date, description, merchant, category, amount, account,
+            INSERT OR REPLACE INTO _transactions
+              (id, user_id, date, description, merchant, category, amount, account,
                account_last4, source_file, page_num, is_transfer, is_refund, is_internal)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
-                    r["id"], r["date"], r["description"],
+                    r["id"], self.user_id, r["date"], r["description"],
                     r.get("merchant"), r.get("category"),
                     r["amount"], r.get("account"), r.get("account_last4"),
                     r.get("source_file"), r.get("page_num"),
@@ -103,6 +166,8 @@ class Ledger:
 
         Raises ValueError if `sql` isn't a single plain SELECT/WITH statement,
         or references a disallowed keyword/function — see _SQL_DISALLOWED_RE.
+        Runs against the connection's user-scoped `transactions` view, so a
+        query never sees another user's rows regardless of what it selects.
         """
         stripped = sql.strip().rstrip(";")
         if ";" in stripped:
@@ -121,19 +186,25 @@ class Ledger:
         return self._con.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
 
     def apply_merchant_names(self) -> int:
+        # Targets the physical table (not the `transactions` view) with an explicit
+        # user_id filter — DuckDB's UPDATE...FROM support over a simple filtered
+        # view isn't something to rely on, so this stays explicit rather than
+        # implicit like the SELECT-side scoping elsewhere in this class.
         result = self._con.execute(
             """
-            UPDATE transactions
+            UPDATE _transactions
             SET merchant = mc.merchant,
                 category = mc.category
             FROM merchant_cache mc
-            WHERE transactions.description = mc.descriptor
-              AND (transactions.merchant IS NULL OR transactions.merchant = '')
-            """
+            WHERE _transactions.description = mc.descriptor
+              AND _transactions.user_id = ?
+              AND (_transactions.merchant IS NULL OR _transactions.merchant = '')
+            """,
+            [self.user_id],
         )
         return result.rowcount or 0
 
-    # ── merchant cache ────────────────────────────────────────────────────────
+    # ── merchant cache (global, not user-scoped) ────────────────────────────────
 
     def upsert_merchants(self, entries: list[dict]) -> None:
         if not entries:
@@ -154,31 +225,104 @@ class Ledger:
         ).fetchall()
         return [r[0] for r in rows]
 
-    # ── query cache ───────────────────────────────────────────────────────────
+    def source_file_summary(self, filename: str) -> dict:
+        """Date range + row count for one just-uploaded file, scoped to this
+        user. Uses a real parameter binding (not the LLM-facing query() path,
+        which is deliberately restricted and not meant for app-internal
+        lookups involving a user-controlled filename)."""
+        row = self._con.execute(
+            "SELECT MIN(date) AS min_date, MAX(date) AS max_date, COUNT(*) AS row_count "
+            "FROM transactions WHERE source_file = ?",
+            [filename],
+        ).fetchone()
+        return {"min_date": row[0], "max_date": row[1], "row_count": row[2]}
 
-    def cache_query(self, question_hash: str, sql: str) -> None:
+    # ── duplicate-upload prevention + coverage labeling ─────────────────────────
+
+    def is_duplicate_upload(self, content_hash: str) -> bool:
+        row = self._con.execute(
+            "SELECT 1 FROM uploaded_statements WHERE user_id = ? AND content_hash = ?",
+            [self.user_id, content_hash],
+        ).fetchone()
+        return row is not None
+
+    def mark_uploaded(
+        self, content_hash: str, filename: str, min_date: str | None,
+        max_date: str | None, row_count: int,
+    ) -> None:
         self._con.execute(
-            "INSERT OR REPLACE INTO query_cache (question_hash, sql, last_used) VALUES (?, ?, current_timestamp)",
-            [question_hash, sql],
+            """
+            INSERT OR REPLACE INTO uploaded_statements
+              (user_id, content_hash, filename, min_date, max_date, row_count)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [self.user_id, content_hash, filename, min_date, max_date, row_count],
         )
 
-    def get_cached_sql(self, question_hash: str) -> str | None:
-        row = self._con.execute(
-            "SELECT sql FROM query_cache WHERE question_hash = ?", [question_hash]
-        ).fetchone()
-        return row[0] if row else None
-
-    # ── export / import for session persistence ───────────────────────────────
+    # ── export / import for manual backups ──────────────────────────────────────
 
     def export_parquet(self, path: Path) -> None:
-        """Dump transactions to Parquet so users can download and re-upload."""
-        self._con.execute(f"COPY transactions TO '{_escape_sql_literal(path)}' (FORMAT PARQUET)")
+        """Dump this user's transactions (only — via the scoped view) to Parquet."""
+        self._con.execute(f"COPY transactions TO '{_escape_sql_literal(str(path))}' (FORMAT PARQUET)")
 
     def import_parquet(self, path: Path) -> int:
+        # Explicit column list, forcing user_id to the CURRENT connection's identity
+        # regardless of whatever user_id (if any) is stored in the file — restoring
+        # a backup is "these are my transactions," not an arbitrary cross-user write.
         self._con.execute(
-            f"INSERT OR REPLACE INTO transactions SELECT * FROM read_parquet('{_escape_sql_literal(path)}')"
+            f"""
+            INSERT OR REPLACE INTO _transactions
+              (id, user_id, date, description, merchant, category, amount, account,
+               account_last4, source_file, page_num, is_transfer, is_refund, is_internal)
+            SELECT id, ?, date, description, merchant, category, amount, account,
+                   account_last4, source_file, page_num, is_transfer, is_refund, is_internal
+            FROM read_parquet('{_escape_sql_literal(str(path))}')
+            """,
+            [self.user_id],
         )
         return self.count()
+
+    # ── usage log (self-service, no admin gate) ─────────────────────────────────
+
+    def log_usage_event(self, entry: dict) -> None:
+        self._con.execute(
+            """
+            INSERT INTO usage_log
+              (user_id, timestamp, source, model, input_tokens, output_tokens,
+               cache_creation_input_tokens, cache_read_input_tokens)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                self.user_id, entry["timestamp"], entry["source"], entry["model"],
+                entry["input_tokens"], entry["output_tokens"],
+                entry["cache_creation_input_tokens"], entry["cache_read_input_tokens"],
+            ],
+        )
+
+    def get_usage_log(self) -> list[dict]:
+        """This user's own usage history only — scoped by user_id, same as
+        every other read in this class."""
+        rows = self._con.execute(
+            """
+            SELECT timestamp, source, model, input_tokens, output_tokens,
+                   cache_creation_input_tokens, cache_read_input_tokens
+            FROM usage_log WHERE user_id = ? ORDER BY timestamp
+            """,
+            [self.user_id],
+        ).fetchall()
+        cols = ["timestamp", "source", "model", "input_tokens", "output_tokens",
+                "cache_creation_input_tokens", "cache_read_input_tokens"]
+        return [dict(zip(cols, r)) for r in rows]
+
+    # ── data deletion ────────────────────────────────────────────────────────
+
+    def delete_all_user_data(self) -> None:
+        """Wipe every row belonging to this user_id — transactions, upload
+        history, and usage log. Does not touch merchant_cache (global, not
+        personal data) or any other user's rows."""
+        self._con.execute("DELETE FROM _transactions WHERE user_id = ?", [self.user_id])
+        self._con.execute("DELETE FROM uploaded_statements WHERE user_id = ?", [self.user_id])
+        self._con.execute("DELETE FROM usage_log WHERE user_id = ?", [self.user_id])
 
     def close(self) -> None:
         self._con.close()

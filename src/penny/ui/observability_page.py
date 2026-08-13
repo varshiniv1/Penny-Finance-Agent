@@ -40,13 +40,17 @@ def _estimate_cost(entry: dict) -> float:
     ) / 1_000_000
 
 
-def show() -> None:
-    st.header("Observability")
-    st.caption("Token usage and estimated cost for this browser session only — resets on refresh.")
+def show(user_key: str) -> None:
+    st.header("Your usage")
+    st.caption(
+        "Token usage and estimated cost across every session you've used this API "
+        "key for — not just this one. Only you can see this: it's scoped to your "
+        "own account, the same way your transactions are."
+    )
 
-    log = get_usage_log()
+    log = get_usage_log(user_key)
     if not log:
-        st.info("No API calls made yet this session.")
+        st.info("No API calls recorded yet.")
         return
 
     total_input = sum(e["input_tokens"] for e in log)

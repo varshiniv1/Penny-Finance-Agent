@@ -205,6 +205,11 @@ def run_turn(
                 # continues, instead of silently dropping it from history.
                 block_dict = block.model_dump()
                 assistant_content.append(block_dict)
+                if block.type == "server_tool_use":
+                    # The invocation side (web_search, code_execution, ...) —
+                    # surfaced the same lightweight way as a client-side tool_call,
+                    # so it shows up as an operation indicator in the UI too.
+                    yield {"type": "tool_call", "name": block.name, "input": block.input}
                 if block.type == "bash_code_execution_tool_result":
                     yield {"type": "code_execution", "block": block_dict}
                     yield from _emit_code_execution_files(client, block)

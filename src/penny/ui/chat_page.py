@@ -1,6 +1,8 @@
-"""Streamlit page: a single chat surface — attach statements and ask questions in one thread."""
+"""Streamlit page: a single chat surface — ask questions about statements uploaded
+via the sidebar (see streamlit_app.py's "Upload statements" expander)."""
 from __future__ import annotations
 
+import hashlib
 import re
 
 import plotly.io as pio
@@ -13,7 +15,8 @@ from penny.ingest.extractor import extract
 from penny.ingest.parser import parse_file_bytes
 from penny.ingest.reconcile import reconcile
 from penny.ui.session import (
-    friendly_api_error, get_ledger, get_fts, get_history, log_usage, reset_session, tx_count,
+    friendly_api_error, get_ledger, get_fts, get_history, get_user_key,
+    log_usage, reset_session, tx_count,
 )
 
 _FILE_TYPES = ["pdf", "csv", "jpg", "jpeg", "png", "tiff", "tif", "bmp"]
@@ -22,6 +25,53 @@ _MAX_FILE_MB = 20
 # hold raw image/chart/file bytes per turn, which would otherwise grow
 # unbounded over a long session.
 _MAX_DISPLAY_MESSAGES = 200
+
+_MONTH_ABBR = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _yearmonth(date_str: str) -> tuple[int, int]:
+    y, m, _ = str(date_str).split("-")
+    return int(y), int(m)
+
+
+def _month_span(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
+    months = []
+    y, m = start
+    while (y, m) <= end:
+        months.append((y, m))
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    return months
+
+
+def _format_ym(ym: tuple[int, int]) -> str:
+    y, m = ym
+    return f"{_MONTH_ABBR[m]} {y}"
+
+
+def _coverage_label(per_file_ranges: list[tuple[str, str]]) -> str:
+    """Given each accepted file's (min_date, max_date), return a label like
+    "Jan 2026 – Apr 2026" if the combined months are one continuous span, or
+    a plain list of the actual covered months if there's a real gap — never
+    implying continuity that isn't there."""
+    if not per_file_ranges:
+        return ""
+    covered: set[tuple[int, int]] = set()
+    for min_d, max_d in per_file_ranges:
+        if not min_d or not max_d:
+            continue
+        covered.update(_month_span(_yearmonth(min_d), _yearmonth(max_d)))
+    if not covered:
+        return ""
+    months_sorted = sorted(covered)
+    if _month_span(months_sorted[0], months_sorted[-1]) == months_sorted:
+        if months_sorted[0] == months_sorted[-1]:
+            return _format_ym(months_sorted[0])
+        return f"{_format_ym(months_sorted[0])} – {_format_ym(months_sorted[-1])}"
+    return ", ".join(_format_ym(ym) for ym in months_sorted)
 
 
 _DOLLAR_RE = re.compile(r"(?<!\\)\$")
@@ -49,7 +99,32 @@ def _normalize_markdown(text: str) -> str:
     return text
 
 
+def _describe_tool_call(name: str, tool_input: dict) -> str:
+    """Short, human-readable label for a tool call — shown in light/muted text,
+    like Claude Code's own operation indicators. Deliberately never includes the
+    raw SQL or full query text (chat stays free of implementation detail)."""
+    if name == "query_sql":
+        return "Queried your transactions"
+    if name == "search_text":
+        return f'Searched for "{tool_input.get("query", "")}"'
+    if name == "generate_chart":
+        return f'Built a {tool_input.get("chart_type", "")} chart'
+    if name == "categorize_transaction":
+        descriptor = str(tool_input.get("descriptor", ""))[:40]
+        return f'Looked up "{descriptor}"'
+    if name == "web_search":
+        return f'Searched the web for "{tool_input.get("query", "")}"'
+    if name == "code_execution":
+        return "Ran code"
+    return f"Ran {name}"
+
+
 def _append(role: str, type_: str, **fields) -> None:
+    # Defensive, not just show()'s job: process_uploads() is called from the
+    # sidebar in streamlit_app.py, which renders before show() does — relying
+    # on show() having already initialized this on some earlier run is fragile.
+    if "display_messages" not in st.session_state:
+        st.session_state["display_messages"] = []
     msgs = st.session_state["display_messages"]
     msgs.append({"role": role, "type": type_, **fields})
     if len(msgs) > _MAX_DISPLAY_MESSAGES:
@@ -59,6 +134,8 @@ def _append(role: str, type_: str, **fields) -> None:
 def _render_message(msg: dict, key: str) -> None:
     if msg["type"] == "text":
         st.markdown(msg["content"])
+    elif msg["type"] == "op":
+        st.caption(msg["content"])
     elif msg["type"] == "chart":
         st.plotly_chart(pio.from_json(msg["content"]), use_container_width=True)
     elif msg["type"] == "image":
@@ -69,27 +146,36 @@ def _render_message(msg: dict, key: str) -> None:
         )
 
 
-def _process_uploads(files: list, api_key: str) -> None:
-    """Parse, reconcile and load attached statements, then post a summary as the assistant."""
+def process_uploads(files: list, api_key: str) -> None:
+    """Parse, reconcile and load attached statements, then post a summary as the
+    assistant. Called from the sidebar's "Upload statements" expander in
+    streamlit_app.py — uploading lives outside the chat input itself now."""
+    user_key = get_user_key()
     with st.chat_message("assistant"):
         try:
-            ledger = get_ledger()
-            fts = get_fts()
+            ledger = get_ledger(user_key)
+            fts = get_fts(user_key)
         except Exception as e:
             st.error(friendly_api_error(e))
             _append("assistant", "text", content=f"Couldn't open the transaction database: {e}")
             return
 
         with st.spinner(f"Reading {len(files)} file{'s' if len(files) != 1 else ''}…"):
-            all_transactions, errors = [], []
+            all_transactions, errors, accepted, duplicates = [], [], [], []
             for f in files:
                 if f.size > _MAX_FILE_MB * 1024 * 1024:
                     errors.append(f"{f.name}: file is over {_MAX_FILE_MB}MB, skipped")
                     continue
+                data = f.read()
+                content_hash = hashlib.sha1(data).hexdigest()[:16]
+                if ledger.is_duplicate_upload(content_hash):
+                    duplicates.append(f.name)
+                    continue
                 try:
-                    raw_rows = parse_file_bytes(f.read(), f.name)
+                    raw_rows = parse_file_bytes(data, f.name)
                     transactions = [t for r in raw_rows if (t := extract(r)) is not None]
                     all_transactions.extend(t.to_dict() for t in transactions)
+                    accepted.append((f.name, content_hash))
                 except Exception as e:
                     errors.append(f"{f.name}: {e}")
 
@@ -102,11 +188,22 @@ def _process_uploads(files: list, api_key: str) -> None:
                 _append("assistant", "text", content=f"Couldn't save the parsed transactions: {e}")
                 return
 
+            # Record each accepted file so a future re-upload of the same bytes
+            # is rejected as a duplicate, and build the month/year coverage label.
+            ranges = []
+            for filename, content_hash in accepted:
+                info = ledger.source_file_summary(filename)
+                ledger.mark_uploaded(
+                    content_hash, filename, info["min_date"], info["max_date"], info["row_count"]
+                )
+                ranges.append((info["min_date"], info["max_date"]))
+            coverage = _coverage_label(ranges)
+
             enrich_note = ""
             if api_key and reconciled:
                 try:
                     stats = enrich_batch(ledger, api_key)
-                    log_usage("enrichment", "claude-haiku-4-5-20251001", stats.get("usage"))
+                    log_usage("enrichment", "claude-haiku-4-5-20251001", stats.get("usage"), user_key)
                     enrich_note = (
                         f" Categorized {stats['rules'] + stats['web']} merchants"
                         + (f", {stats['ambiguous']} left uncategorized." if stats["ambiguous"] else ".")
@@ -120,12 +217,19 @@ def _process_uploads(files: list, api_key: str) -> None:
                     result = insight(ledger, api_key)
                     if result:
                         insight_text, usage = result
-                        log_usage("upload_insight", "claude-haiku-4-5-20251001", usage)
+                        log_usage("upload_insight", "claude-haiku-4-5-20251001", usage, user_key)
                 except Exception:
                     pass
 
-        names = ", ".join(f.name for f in files)
-        summary = f"Loaded **{n_new}** new transaction(s) from {names}.{enrich_note}"
+        if accepted:
+            names = ", ".join(name for name, _ in accepted)
+            summary = f"Loaded **{n_new}** new transaction(s) from {names}.{enrich_note}"
+            if coverage:
+                summary += f"\n\nCoverage: **{coverage}**"
+        else:
+            summary = "No new transactions loaded."
+        if duplicates:
+            summary += "\n\n" + "\n".join(f"↩️ {name}: already uploaded — skipped" for name in duplicates)
         if errors:
             summary += "\n\n" + "\n".join(f"⚠️ Couldn't read {e}" for e in errors)
         if insight_text:
@@ -139,10 +243,12 @@ def _process_uploads(files: list, api_key: str) -> None:
 
 
 def show() -> None:
+    user_key = get_user_key()
+
     header_col, reset_col = st.columns([6, 1])
     header_col.header("💰 Penny")
     if st.session_state.get("display_messages") and reset_col.button("🗑️ New chat", help="Clear the conversation and loaded transactions"):
-        reset_session()
+        reset_session(user_key)
         st.rerun()
 
     if "display_messages" not in st.session_state:
@@ -154,51 +260,33 @@ def show() -> None:
         with st.chat_message(msg["role"]):
             _render_message(msg, key=f"history_dl_{i}")
 
-    chat_value = st.chat_input(
-        "Ask about your spending, or attach a statement…",
-        accept_file="multiple",
-        file_type=_FILE_TYPES,
-    )
-    if not chat_value:
-        if not st.session_state["display_messages"] and tx_count() == 0:
+    text = st.chat_input("Ask about your spending…")
+    if not text:
+        if not st.session_state["display_messages"] and tx_count(user_key) == 0:
             st.info(
-                "👋 Attach a bank or credit card statement (PDF, CSV, or image) using the "
-                "📎 icon below to get started, then ask me anything about your spending."
+                "👋 Attach a bank or credit card statement using **📎 Upload statements** "
+                "in the sidebar to get started, then ask me anything about your spending."
             )
         return
 
-    text = chat_value.text
-    files = chat_value.files
-
-    if files or text:
-        label = text
-        if files:
-            attachment_line = "📎 " + ", ".join(f.name for f in files)
-            label = f"{attachment_line}\n\n{text}" if text else attachment_line
-        label = _normalize_markdown(label)
-        _append("user", "text", content=label)
-        with st.chat_message("user"):
-            st.markdown(label)
-
-    if files:
-        _process_uploads(files, api_key)
-
-    if not text:
-        return
+    label = _normalize_markdown(text)
+    _append("user", "text", content=label)
+    with st.chat_message("user"):
+        st.markdown(label)
 
     if not api_key:
         with st.chat_message("assistant"):
             st.error("Add your Anthropic API key in the sidebar to chat.")
         return
 
-    if tx_count() == 0:
+    if tx_count(user_key) == 0:
         with st.chat_message("assistant"):
-            st.warning("Attach a statement first (📎 below) so I have something to answer questions about.")
+            st.warning("Attach a statement first (📎 Upload statements in the sidebar) so I have something to answer questions about.")
         return
 
     history = get_history()
-    ledger = get_ledger()
-    fts = get_fts()
+    ledger = get_ledger(user_key)
+    fts = get_fts(user_key)
 
     with st.chat_message("assistant"):
         text_placeholder = st.empty()
@@ -229,11 +317,18 @@ def show() -> None:
                         text_placeholder.empty()
 
                 if event["type"] == "usage":
-                    log_usage(event["source"], event["model"], event["usage"])
+                    log_usage(event["source"], event["model"], event["usage"], user_key)
 
                 elif event["type"] == "text":
                     accumulated_text += event["text"]
                     text_placeholder.markdown(_normalize_markdown(accumulated_text) + "▌")
+                    got_output = True
+
+                elif event["type"] == "tool_call":
+                    _flush_text()
+                    label = _describe_tool_call(event["name"], event["input"])
+                    st.caption(label)
+                    _append("assistant", "op", content=label)
                     got_output = True
 
                 elif event["type"] == "chart":

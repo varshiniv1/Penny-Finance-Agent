@@ -48,7 +48,7 @@ _FIXTURE_ROWS = [
 def build_fixture_ledger() -> Ledger:
     """Return an in-memory Ledger pre-seeded with fixture data."""
     import hashlib
-    ledger = Ledger(":memory:")
+    ledger = Ledger(":memory:", "fixture_user")
     rows = []
     for i, r in enumerate(_FIXTURE_ROWS):
         row = dict(r)

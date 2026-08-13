@@ -78,7 +78,22 @@ with st.sidebar:
             st.rerun()
 
     with st.expander("🗑️ Delete my data"):
-        st.caption("Permanently remove everything saved under this API key.")
+        uploads = chat_page.list_uploads()
+        if uploads:
+            st.caption("Remove one statement:")
+            for u in uploads:
+                date_range = (
+                    f"{u['min_date']} – {u['max_date']}" if u["min_date"] else "no dated rows"
+                )
+                col1, col2 = st.columns([4, 1])
+                col1.markdown(f"**{u['filename']}**  \n{u['row_count']} rows, {date_range}")
+                if col2.button("Delete", key=f"del_upload_{u['content_hash']}"):
+                    n = chat_page.delete_upload(u["content_hash"])
+                    st.success(f"Removed {n} transaction(s) from {u['filename']}.")
+                    st.rerun()
+            st.divider()
+
+        st.caption("Or permanently remove everything saved under this API key.")
         if st.button("Delete all my saved data"):
             delete_all_user_data(user_key)
             st.success("Deleted. Your saved transactions are gone.")

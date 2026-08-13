@@ -242,6 +242,22 @@ def process_uploads(files: list, api_key: str) -> None:
         _append("assistant", "text", content=summary)
 
 
+def list_uploads() -> list[dict]:
+    """This user's uploaded statements, for the sidebar's per-file delete
+    list — see streamlit_app.py's "Delete my data" expander."""
+    return get_ledger(get_user_key()).list_uploads()
+
+
+def delete_upload(content_hash: str) -> int:
+    """Remove exactly one prior upload's transactions (not the whole
+    account) and rebuild the search index to match. Returns the number of
+    transactions removed."""
+    user_key = get_user_key()
+    n = get_ledger(user_key).delete_upload(content_hash)
+    get_fts(user_key).index()
+    return n
+
+
 def show() -> None:
     user_key = get_user_key()
 

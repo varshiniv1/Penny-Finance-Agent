@@ -33,6 +33,10 @@ class Transaction:
     is_transfer: bool = False
     is_refund: bool = False
     is_internal: bool = False
+    # SHA-1 of the uploaded file's bytes (see parser.parse_file_bytes) — lets
+    # a specific upload be deleted precisely later, since source_file (the
+    # filename alone) isn't unique: two different files can share a name.
+    content_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -77,6 +81,7 @@ def extract(raw: dict) -> Transaction | None:
         source_file=source_file,
         page_num=page_num,
         is_refund=is_refund,
+        content_hash=str(raw.get("content_hash") or ""),
     )
 
 

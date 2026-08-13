@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS _transactions (
     is_transfer   BOOLEAN DEFAULT false,
     is_refund     BOOLEAN DEFAULT false,
     is_internal   BOOLEAN DEFAULT false,
+    content_hash  VARCHAR,
     PRIMARY KEY (id)
 );
 
@@ -125,6 +126,14 @@ class Ledger:
         # unshared databases.
         self._con = duckdb.connect(connection) if isinstance(connection, str) else connection
         self._con.execute(_DDL)
+        # CREATE TABLE IF NOT EXISTS above is a no-op against a table already
+        # created by an earlier version of this schema (i.e. the live
+        # MotherDuck database from before content_hash existed) — add it here
+        # so both fresh and already-deployed databases end up with the column.
+        try:
+            self._con.execute("ALTER TABLE _transactions ADD COLUMN content_hash VARCHAR")
+        except duckdb.Error:
+            pass  # already has the column
         # Connection-local — never visible to any other connection, including
         # another browser tab/session for the same user (verified empirically).
         # DDL can't be parameterized in DuckDB ("Unexpected prepared parameter"),
@@ -144,8 +153,9 @@ class Ledger:
             """
             INSERT OR REPLACE INTO _transactions
               (id, user_id, date, description, merchant, category, amount, account,
-               account_last4, source_file, page_num, is_transfer, is_refund, is_internal)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               account_last4, source_file, page_num, is_transfer, is_refund, is_internal,
+               content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -154,7 +164,7 @@ class Ledger:
                     r["amount"], r.get("account"), r.get("account_last4"),
                     r.get("source_file"), r.get("page_num"),
                     r.get("is_transfer", False), r.get("is_refund", False),
-                    r.get("is_internal", False),
+                    r.get("is_internal", False), r.get("content_hash"),
                 )
                 for r in rows
             ],
@@ -258,6 +268,44 @@ class Ledger:
             """,
             [self.user_id, content_hash, filename, min_date, max_date, row_count],
         )
+
+    def list_uploads(self) -> list[dict]:
+        """This user's accepted uploads, most recent first — powers the
+        per-file delete UI."""
+        rows = self._con.execute(
+            """
+            SELECT content_hash, filename, uploaded_at, min_date, max_date, row_count
+            FROM uploaded_statements WHERE user_id = ? ORDER BY uploaded_at DESC
+            """,
+            [self.user_id],
+        ).fetchall()
+        cols = ["content_hash", "filename", "uploaded_at", "min_date", "max_date", "row_count"]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def delete_upload(self, content_hash: str) -> int:
+        """Remove exactly the transactions from one prior upload (and its
+        uploaded_statements record, freeing that file to be re-uploaded
+        later) — scoped by content_hash, not filename, since two different
+        files can share a name. Returns the number of transactions removed.
+        Caller is responsible for re-running fts.index() afterward.
+
+        Counts explicitly rather than trusting DELETE's rowcount — verified
+        against a live MotherDuck connection that it reports -1 there (a
+        real behavioral difference from local DuckDB, not a hypothetical
+        one), so rowcount can't be relied on for this."""
+        n = self._con.execute(
+            "SELECT COUNT(*) FROM _transactions WHERE user_id = ? AND content_hash = ?",
+            [self.user_id, content_hash],
+        ).fetchone()[0]
+        self._con.execute(
+            "DELETE FROM _transactions WHERE user_id = ? AND content_hash = ?",
+            [self.user_id, content_hash],
+        )
+        self._con.execute(
+            "DELETE FROM uploaded_statements WHERE user_id = ? AND content_hash = ?",
+            [self.user_id, content_hash],
+        )
+        return n
 
     # ── export / import for manual backups ──────────────────────────────────────
 

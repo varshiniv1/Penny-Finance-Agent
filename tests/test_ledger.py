@@ -183,6 +183,77 @@ def test_source_file_summary(ledger):
     assert str(info["max_date"]) == "2024-02-20"
 
 
+# ── Per-upload deletion ──────────────────────────────────────────────────────
+
+def _seed_two_uploads(ledger):
+    ledger.upsert([
+        {"id": "fa-1", "date": "2024-01-05", "description": "Coffee A", "amount": 5.0,
+         "source_file": "fileA.pdf", "content_hash": "hash_a"},
+        {"id": "fa-2", "date": "2024-01-10", "description": "Groceries A", "amount": 40.0,
+         "source_file": "fileA.pdf", "content_hash": "hash_a"},
+    ])
+    ledger.mark_uploaded("hash_a", "fileA.pdf", "2024-01-05", "2024-01-10", 2)
+    ledger.upsert([
+        {"id": "fb-1", "date": "2024-02-03", "description": "Gas B", "amount": 30.0,
+         "source_file": "fileB.pdf", "content_hash": "hash_b"},
+    ])
+    ledger.mark_uploaded("hash_b", "fileB.pdf", "2024-02-03", "2024-02-03", 1)
+
+
+def test_list_uploads_returns_this_users_uploads(ledger):
+    _seed_two_uploads(ledger)
+    uploads = ledger.list_uploads()
+    assert {u["filename"] for u in uploads} == {"fileA.pdf", "fileB.pdf"}
+
+
+def test_delete_upload_removes_only_that_files_transactions(ledger):
+    _seed_two_uploads(ledger)
+    removed = ledger.delete_upload("hash_a")
+    assert removed == 2
+    remaining_ids = {r["id"] for r in ledger.query("SELECT id FROM transactions")}
+    # fileA's two rows are gone; fileB's row and the fixture's original two
+    # rows (no content_hash, untouched by either upload) all survive.
+    assert remaining_ids == {"a", "b", "fb-1"}
+
+
+def test_delete_upload_removes_its_upload_history_entry(ledger):
+    _seed_two_uploads(ledger)
+    ledger.delete_upload("hash_a")
+    uploads = ledger.list_uploads()
+    assert {u["filename"] for u in uploads} == {"fileB.pdf"}
+    assert ledger.is_duplicate_upload("hash_a") is False
+
+
+def test_delete_upload_lets_the_same_file_be_reuploaded(ledger):
+    _seed_two_uploads(ledger)
+    ledger.delete_upload("hash_a")
+    # Same content_hash as before deletion — re-upserting shouldn't collide
+    # with anything still present (fileB's row uses a different id/hash).
+    ledger.upsert([
+        {"id": "fa-1-again", "date": "2024-03-01", "description": "Coffee A retry",
+         "amount": 6.0, "source_file": "fileA.pdf", "content_hash": "hash_a"},
+    ])
+    assert ledger.is_duplicate_upload("hash_a") is False  # not re-marked until mark_uploaded() runs
+    ledger.mark_uploaded("hash_a", "fileA.pdf", "2024-03-01", "2024-03-01", 1)
+    assert ledger.is_duplicate_upload("hash_a") is True
+
+
+def test_delete_upload_is_scoped_per_user(shared_db):
+    a = Ledger(shared_db.cursor(), "user_a")
+    b = Ledger(shared_db.cursor(), "user_b")
+    for l in (a, b):
+        l.upsert([
+            {"id": f"{l.user_id}-1", "date": "2024-01-05", "description": "Coffee",
+             "amount": 5.0, "source_file": "statement.pdf", "content_hash": "same_hash"},
+        ])
+        l.mark_uploaded("same_hash", "statement.pdf", "2024-01-05", "2024-01-05", 1)
+
+    removed = a.delete_upload("same_hash")
+    assert removed == 1
+    assert a.count() == 0
+    assert b.count() == 1  # user_b's identical-hash upload is untouched
+
+
 # ── Usage log (self-service, no admin gate) ─────────────────────────────────
 
 _USAGE_ENTRY = {

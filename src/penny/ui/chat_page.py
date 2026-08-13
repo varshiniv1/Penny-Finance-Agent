@@ -134,7 +134,7 @@ def _append(role: str, type_: str, **fields) -> None:
 def _render_message(msg: dict, key: str) -> None:
     if msg["type"] == "text":
         st.markdown(msg["content"])
-    elif msg["type"] == "op":
+    elif msg["type"] in ("op", "note"):
         st.caption(msg["content"])
     elif msg["type"] == "chart":
         st.plotly_chart(pio.from_json(msg["content"]))
@@ -306,23 +306,45 @@ def show() -> None:
 
     with st.chat_message("assistant"):
         text_placeholder = st.empty()
-        text_placeholder.markdown("_Thinking…_")
+        text_placeholder.caption("Thinking…")
         accumulated_text = ""
         got_output = False
         thinking_cleared = False
 
-        def _flush_text() -> None:
-            # Persist and lock in the current text segment, then start a
-            # fresh placeholder so the next segment renders below whatever
-            # comes next (chart/image/file), instead of overwriting this one.
-            nonlocal text_placeholder, accumulated_text
+        def _flush_text(final: bool = False) -> None:
+            # Persist and lock in the current text segment into its existing
+            # placeholder — does NOT create the next one. That has to happen
+            # in the caller, and only *after* it renders its own content
+            # (tool-call label / chart / image / file): st.empty() reserves
+            # its DOM position the instant it's called, before it has
+            # anything to show, so creating it here — before that content
+            # renders — would reserve a slot ahead of it. The next segment
+            # would then land in that earlier slot once filled, visually
+            # jumping ahead of the tool call that actually preceded it.
+            #
+            # We can't know a segment is the *actual* final answer until the
+            # turn ends with no further tool call after it — so every segment
+            # streams muted (like the tool-call labels), and only the one
+            # still open when "done" fires gets upgraded to full-weight text.
+            # Everything earlier — the model's own "I'll check that..."
+            # narration between tool calls — stays muted permanently, the
+            # same visual language Claude Code uses for in-progress commentary
+            # versus a finished deliverable.
+            nonlocal accumulated_text
             if accumulated_text:
                 normalized = _normalize_markdown(accumulated_text)
-                text_placeholder.markdown(normalized)
-                _append("assistant", "text", content=normalized)
+                if final:
+                    text_placeholder.markdown(normalized)
+                    _append("assistant", "text", content=normalized)
+                else:
+                    text_placeholder.caption(normalized)
+                    _append("assistant", "note", content=normalized)
             else:
                 text_placeholder.empty()
             accumulated_text = ""
+
+        def _new_placeholder() -> None:
+            nonlocal text_placeholder
             text_placeholder = st.empty()
 
         try:
@@ -336,8 +358,12 @@ def show() -> None:
                     log_usage(event["source"], event["model"], event["usage"], user_key)
 
                 elif event["type"] == "text":
+                    # Muted while streaming — we don't yet know if this segment
+                    # is commentary or the final answer; _flush_text() decides
+                    # that once the turn's outcome (more tool calls, or done)
+                    # is known, and upgrades it then if so.
                     accumulated_text += event["text"]
-                    text_placeholder.markdown(_normalize_markdown(accumulated_text) + "▌")
+                    text_placeholder.caption(_normalize_markdown(accumulated_text) + "▌")
                     got_output = True
 
                 elif event["type"] == "tool_call":
@@ -345,6 +371,19 @@ def show() -> None:
                     label = _describe_tool_call(event["name"], event["input"])
                     st.caption(label)
                     _append("assistant", "op", content=label)
+                    _new_placeholder()
+                    got_output = True
+
+                elif event["type"] == "op_result":
+                    # Completes a web_search/code_execution call announced by
+                    # the "tool_call" branch above — e.g. "Found 5 results"
+                    # or "Code ran successfully". Previously this outcome had
+                    # no event at all for web_search, and no *handler* for
+                    # code_execution even though loop.py already yielded one.
+                    _flush_text()
+                    st.caption(event["text"])
+                    _append("assistant", "op", content=event["text"])
+                    _new_placeholder()
                     got_output = True
 
                 elif event["type"] == "chart":
@@ -352,12 +391,14 @@ def show() -> None:
                     fig = pio.from_json(event["chart_json"])
                     st.plotly_chart(fig)
                     _append("assistant", "chart", content=event["chart_json"])
+                    _new_placeholder()
                     got_output = True
 
                 elif event["type"] == "image":
                     _flush_text()
                     st.image(event["image_bytes"])
                     _append("assistant", "image", content=event["image_bytes"])
+                    _new_placeholder()
                     got_output = True
 
                 elif event["type"] == "file":
@@ -371,10 +412,11 @@ def show() -> None:
                     _append(
                         "assistant", "file", filename=event["filename"], content=event["file_bytes"]
                     )
+                    _new_placeholder()
                     got_output = True
 
                 elif event["type"] == "done":
-                    _flush_text()
+                    _flush_text(final=True)
                     if not got_output:
                         st.warning("Penny didn't return a response — try rephrasing your question.")
         except Exception as e:

@@ -95,6 +95,29 @@ def _trim_history(history: list[dict]) -> None:
     del history[:cut]
 
 
+def _summarize_web_search_result(block) -> str:
+    """One-line status for a completed web_search call — content is either a
+    WebSearchToolResultError (has .type == "web_search_tool_result_error") or
+    a plain list of result blocks (no .type attribute, hence the getattr
+    default) on success."""
+    content = block.content
+    if getattr(content, "type", None) == "web_search_tool_result_error":
+        return f"Web search failed ({content.error_code})"
+    n = len(content) if isinstance(content, list) else 0
+    return f"Found {n} result{'s' if n != 1 else ''}"
+
+
+def _summarize_code_execution_result(block) -> str:
+    """One-line status for a completed code_execution call — content is
+    either a BetaBashCodeExecutionToolResultError or a
+    BetaBashCodeExecutionResultBlock (has .return_code) on success."""
+    content = block.content
+    if getattr(content, "type", None) == "bash_code_execution_tool_result_error":
+        return f"Code execution failed ({content.error_code})"
+    code = getattr(content, "return_code", None)
+    return "Code ran successfully" if code == 0 else f"Code exited with status {code}"
+
+
 def _emit_code_execution_files(client, block) -> Generator[dict, None, None]:
     """Download any files a code_execution call produced — a chart image, or (with
     the xlsx skill enabled) a generated spreadsheet.
@@ -137,6 +160,7 @@ def run_turn(
       {"type": "text",           "text": "..."}
       {"type": "tool_call",      "name": "...", "input": {...}}
       {"type": "tool_result",    "name": "...", "result": {...}}
+      {"type": "op_result",      "text": "..."}
       {"type": "chart",          "chart_json": "..."}
       {"type": "sql",            "sql": "..."}
       {"type": "code_execution", "block": {...}}
@@ -211,8 +235,15 @@ def run_turn(
                     # so it shows up as an operation indicator in the UI too.
                     yield {"type": "tool_call", "name": block.name, "input": block.input}
                 if block.type == "bash_code_execution_tool_result":
+                    yield {"type": "op_result", "text": _summarize_code_execution_result(block)}
                     yield {"type": "code_execution", "block": block_dict}
                     yield from _emit_code_execution_files(client, block)
+                if block.type == "web_search_tool_result":
+                    # Previously fell all the way through to the bare
+                    # assistant_content.append() above with no UI event at
+                    # all — a web_search call's invocation showed up (via the
+                    # server_tool_use branch), but never its outcome.
+                    yield {"type": "op_result", "text": _summarize_web_search_result(block)}
 
         history.append({"role": "assistant", "content": assistant_content})
         messages.append({"role": "assistant", "content": assistant_content})

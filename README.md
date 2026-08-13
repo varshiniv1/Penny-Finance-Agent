@@ -9,7 +9,7 @@ you paste in, so the same key brings your data back on your next visit.
 Raw statement files are discarded immediately after parsing — only the
 extracted transactions are kept. Those persist (on MotherDuck, a hosted
 DuckDB database) so they're there next time you sign in with the same key,
-until you delete them yourself from the sidebar's **💾 Export data**
+until you delete them yourself from the sidebar's **🗑️ Delete my data**
 section. Usage/cost data works the same way: a **📊 Your usage** section
 shows only your own token usage — nobody else's, no admin access required.
 
@@ -66,7 +66,3 @@ transactions) and `search_transactions` (full-text search) — the same
 underlying `Ledger`/`FTSIndex` code the Streamlit app itself uses, and the
 same identity-hashing logic (`penny/identity.py`), so it's always scoped to
 your own data, never anyone else's.
-
-If you'd rather keep an offline copy instead — for backup, or to hand data
-to something that isn't MCP-aware — the sidebar's **💾 Export data** section
-still produces a Parquet snapshot you can download.

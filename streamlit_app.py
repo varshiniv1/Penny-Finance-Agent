@@ -35,9 +35,7 @@ st.markdown(
 )
 
 from penny.ui import chat_page, observability_page
-from penny.ui.session import (
-    delete_all_user_data, get_display_label, get_ledger, get_user_key, tx_count,
-)
+from penny.ui.session import delete_all_user_data, get_display_label, get_user_key
 
 _FILE_TYPES = ["pdf", "csv", "jpg", "jpeg", "png", "tiff", "tif", "bmp"]
 
@@ -79,42 +77,9 @@ with st.sidebar:
             chat_page.process_uploads(uploads, api_key)
             st.rerun()
 
-    with st.expander("💾 Export data"):
-        st.caption(
-            "Your transactions are saved automatically and are here next time you "
-            "sign in with the same API key — no need to restore a backup. Export a "
-            "Parquet snapshot if you want an offline copy, or to query your data "
-            "from an MCP client like Claude Desktop (see README)."
-        )
-        if tx_count(user_key) > 0:
-            if st.button("Export transactions (Parquet)"):
-                import tempfile, pathlib
-                from datetime import datetime, timezone
-
-                with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-                    tmp_path = pathlib.Path(tmp.name)
-                try:
-                    get_ledger(user_key).export_parquet(tmp_path)
-                    # Timestamped so re-exporting later the same day (or a
-                    # different session) never silently overwrites an earlier
-                    # download sitting in the same Downloads folder.
-                    export_name = (
-                        "penny_session_"
-                        + datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M")
-                        + ".parquet"
-                    )
-                    st.download_button(
-                        f"Download {export_name}",
-                        data=tmp_path.read_bytes(),
-                        file_name=export_name,
-                        mime="application/octet-stream",
-                    )
-                finally:
-                    tmp_path.unlink(missing_ok=True)
-
-        st.divider()
+    with st.expander("🗑️ Delete my data"):
         st.caption("Permanently remove everything saved under this API key.")
-        if st.button("🗑️ Delete all my saved data"):
+        if st.button("Delete all my saved data"):
             delete_all_user_data(user_key)
             st.success("Deleted. Your saved transactions are gone.")
             st.rerun()

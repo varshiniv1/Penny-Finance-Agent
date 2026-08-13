@@ -63,14 +63,24 @@ with st.sidebar:
         if tx_count() > 0:
             if st.button("Export transactions (Parquet)"):
                 import tempfile, pathlib
+                from datetime import datetime, timezone
+
                 with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
                     tmp_path = pathlib.Path(tmp.name)
                 try:
                     get_ledger().export_parquet(tmp_path)
+                    # Timestamped so re-exporting later the same day (or a
+                    # different session) never silently overwrites an earlier
+                    # download sitting in the same Downloads folder.
+                    export_name = (
+                        "penny_session_"
+                        + datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M")
+                        + ".parquet"
+                    )
                     st.download_button(
-                        "Download penny_data.parquet",
+                        f"Download {export_name}",
                         data=tmp_path.read_bytes(),
-                        file_name="penny_data.parquet",
+                        file_name=export_name,
                         mime="application/octet-stream",
                     )
                 finally:

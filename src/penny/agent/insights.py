@@ -9,19 +9,27 @@ if TYPE_CHECKING:
 
 # Same aggregation shape as the dashboard charts (charts/templates.py) — small,
 # already-summarized rows, not raw transactions, so this stays a cheap call.
+#
+# is_internal alone under-excludes: it's only set when reconcile.py found a
+# matching transaction on another account, which needs the user to have
+# uploaded every account involved. A single-statement upload (the common
+# case) has real transfers/card payments correctly categorized 'Transfer'
+# but never matched, so is_internal stays false for them — excluding the
+# category too catches those without requiring multi-account data.
+_EXCLUDE_TRANSFERS = "is_internal = false AND category != 'Transfer'"
 _CATEGORY_SQL = (
     "SELECT category, SUM(amount) AS total FROM transactions "
-    "WHERE is_internal = false AND amount > 0 AND category IS NOT NULL AND category != '' "
+    f"WHERE {_EXCLUDE_TRANSFERS} AND amount > 0 AND category IS NOT NULL AND category != '' "
     "GROUP BY category ORDER BY total DESC"
 )
 _MONTHLY_SQL = (
     "SELECT strftime(date, '%Y-%m') AS month, SUM(amount) AS total "
-    "FROM transactions WHERE is_internal = false AND amount > 0 "
+    f"FROM transactions WHERE {_EXCLUDE_TRANSFERS} AND amount > 0 "
     "GROUP BY month ORDER BY month"
 )
 _TOP_MERCHANTS_SQL = (
     "SELECT COALESCE(NULLIF(merchant, ''), description) AS name, SUM(amount) AS total "
-    "FROM transactions WHERE is_internal = false AND amount > 0 "
+    f"FROM transactions WHERE {_EXCLUDE_TRANSFERS} AND amount > 0 "
     "GROUP BY name ORDER BY total DESC LIMIT 10"
 )
 

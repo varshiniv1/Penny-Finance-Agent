@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
+import json
 import re
+import time
+from urllib.parse import urlparse
 
 import plotly.io as pio
 import streamlit as st
@@ -27,7 +30,7 @@ _TITLE_MAX_LEN = 50
 # Types that make it into the persisted transcript / search index — never
 # chart/image/file, whose "content" is binary or a large JSON chart spec, not
 # something worth storing per-turn or searching by text.
-_PERSISTABLE_TYPES = ("text", "op", "note", "thinking")
+_PERSISTABLE_TYPES = ("text", "op", "note", "thinking", "search_results")
 
 _FILE_TYPES = ["pdf", "csv", "jpg", "jpeg", "png", "tiff", "tif", "bmp"]
 _MAX_FILE_MB = 20
@@ -176,14 +179,32 @@ def _append(role: str, type_: str, **fields) -> None:
         del msgs[: len(msgs) - _MAX_DISPLAY_MESSAGES]
 
 
+def _render_search_results(results: list[dict]) -> None:
+    """A result card like the one on claude.ai: title + source domain per
+    row, collapsed by default. Shared between the live-streaming render and
+    replaying a saved conversation, so both look identical."""
+    n = len(results)
+    with st.expander(f"🌐 {n} result{'s' if n != 1 else ''}", expanded=False):
+        for r in results:
+            domain = urlparse(r["url"]).netloc
+            st.markdown(f"[{r['title']}]({r['url']})")
+            st.caption(domain)
+
+
 def _render_message(msg: dict, key: str) -> None:
     if msg["type"] == "text":
         st.markdown(msg["content"])
     elif msg["type"] in ("op", "note"):
         st.caption(msg["content"])
     elif msg["type"] == "thinking":
-        with st.expander("💭 Thinking", expanded=False):
+        # Replayed from a saved conversation — the live view shows elapsed
+        # thinking time in the title (see show()'s thinking_stop handling),
+        # but that duration isn't persisted, so replay just shows a plain
+        # label rather than a fabricated or missing number.
+        with st.expander("🕐 Thinking", expanded=False):
             st.caption(msg["content"])
+    elif msg["type"] == "search_results":
+        _render_search_results(json.loads(msg["content"]))
     elif msg["type"] == "chart":
         st.plotly_chart(pio.from_json(msg["content"]))
     elif msg["type"] == "image":
@@ -424,6 +445,7 @@ def show() -> None:
         accumulated_text = ""
         thinking_placeholder = None
         accumulated_thinking = ""
+        thinking_started_at = 0.0
         got_output = False
         thinking_cleared = False
 
@@ -486,20 +508,24 @@ def show() -> None:
                     # Same live-typing treatment as "text" below, streamed
                     # token-by-token — the expander stays open (expanded=True)
                     # while reasoning is actively arriving, the same way
-                    # Claude Code shows its own thinking live rather than
-                    # only after the fact.
+                    # Claude Code/claude.ai show a "Thought for Ns" block live
+                    # rather than only after the fact. Duration is timed here
+                    # (wall-clock, client-side) rather than asked of the API —
+                    # no extra request, just local bookkeeping around events
+                    # already being streamed.
                     _flush_text()
                     thinking_placeholder = st.empty()
                     accumulated_thinking = ""
+                    thinking_started_at = time.monotonic()
                     with thinking_placeholder:
-                        with st.expander("💭 Thinking", expanded=True):
+                        with st.expander("🕐 Thinking…", expanded=True):
                             st.caption("▌")
                     got_output = True
 
                 elif event["type"] == "thinking_delta":
                     accumulated_thinking += event["text"]
                     with thinking_placeholder:
-                        with st.expander("💭 Thinking", expanded=True):
+                        with st.expander("🕐 Thinking…", expanded=True):
                             st.caption(_normalize_markdown(accumulated_thinking) + "▌")
                     got_output = True
 
@@ -508,10 +534,22 @@ def show() -> None:
                     # demand without dominating the chat the way a
                     # multi-paragraph thinking trace would inline.
                     thinking_text = _normalize_markdown(accumulated_thinking)
+                    elapsed = max(1, round(time.monotonic() - thinking_started_at))
                     with thinking_placeholder:
-                        with st.expander("💭 Thinking", expanded=False):
+                        with st.expander(f"🕐 Thought for {elapsed}s", expanded=False):
                             st.caption(thinking_text)
                     _append("assistant", "thinking", content=thinking_text)
+                    _new_placeholder()
+                    got_output = True
+
+                elif event["type"] == "web_search_results":
+                    # The API already returns full result data (title/url per
+                    # hit) as part of the same web_search call — this renders
+                    # more of what was already paid for and received, not an
+                    # extra lookup.
+                    _flush_text()
+                    _render_search_results(event["results"])
+                    _append("assistant", "search_results", content=json.dumps(event["results"]))
                     _new_placeholder()
                     got_output = True
 

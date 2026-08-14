@@ -113,6 +113,22 @@ def _summarize_web_search_result(block) -> str:
     return f"Found {n} result{'s' if n != 1 else ''}"
 
 
+# UI-only cap on how many result cards render — the model itself still sees
+# every result the API returned (this never touches what's sent back to it).
+_MAX_DISPLAYED_SEARCH_RESULTS = 10
+
+
+def _web_search_results(block) -> list[dict]:
+    """title/url pairs for a completed web_search call, for the rich result
+    card — [] on error or an empty result set. No extra API call: this is
+    just reading data the response already carried, previously discarded
+    after being reduced to a bare count."""
+    content = block.content
+    if not isinstance(content, list):
+        return []
+    return [{"title": r.title, "url": r.url} for r in content[:_MAX_DISPLAYED_SEARCH_RESULTS]]
+
+
 def _summarize_code_execution_result(block) -> str:
     """One-line status for a completed code_execution call — content is
     either a BetaBashCodeExecutionToolResultError or a
@@ -170,6 +186,7 @@ def run_turn(
       {"type": "tool_call",      "name": "...", "input": {...}}
       {"type": "tool_result",    "name": "...", "result": {...}}
       {"type": "op_result",      "name": "...", "text": "..."}
+      {"type": "web_search_results", "results": [{"title": "...", "url": "..."}, ...]}
       {"type": "chart",          "chart_json": "..."}
       {"type": "sql",            "sql": "..."}
       {"type": "code_execution", "block": {...}}
@@ -295,6 +312,9 @@ def run_turn(
                         "type": "op_result", "name": "web_search",
                         "text": _summarize_web_search_result(block),
                     }
+                    results = _web_search_results(block)
+                    if results:
+                        yield {"type": "web_search_results", "results": results}
 
         history.append({"role": "assistant", "content": assistant_content})
         messages.append({"role": "assistant", "content": assistant_content})

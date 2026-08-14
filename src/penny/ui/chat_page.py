@@ -2,6 +2,7 @@
 via the sidebar (see streamlit_app.py's "Upload statements" expander)."""
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import re
 
@@ -21,6 +22,13 @@ from penny.ui.session import (
 
 _FILE_TYPES = ["pdf", "csv", "jpg", "jpeg", "png", "tiff", "tif", "bmp"]
 _MAX_FILE_MB = 20
+# Parsing multiple files in one upload runs concurrently, not one at a time —
+# real speedup for OCR specifically (pytesseract/pdf2image shell out to
+# tesseract/poppler as subprocesses, releasing the GIL while they run), less
+# so for plain text-layer PDFs (pdfplumber is pure Python, GIL-bound). Capped
+# so a large batch doesn't spawn dozens of concurrent OCR subprocesses on
+# Streamlit Cloud's modest CPU allocation.
+_MAX_PARSE_WORKERS = 4
 # Cap how many chat turns are kept rendered/in memory — display_messages can
 # hold raw image/chart/file bytes per turn, which would otherwise grow
 # unbounded over a long session.
@@ -192,7 +200,12 @@ def process_uploads(files: list, api_key: str) -> None:
             return
 
         with st.spinner(f"Reading {len(files)} file{'s' if len(files) != 1 else ''}…"):
-            all_transactions, errors, accepted, duplicates = [], [], [], []
+            # Size/duplicate checks stay sequential — they need the ledger
+            # connection, which isn't safe to share across threads. What's
+            # left after this filter is genuinely independent, CPU-bound
+            # parsing work (see _MAX_PARSE_WORKERS), safe to run concurrently
+            # since it touches no Streamlit or database state.
+            errors, duplicates, to_parse = [], [], []
             for f in files:
                 if f.size > _MAX_FILE_MB * 1024 * 1024:
                     errors.append(f"{f.name}: file is over {_MAX_FILE_MB}MB, skipped")
@@ -202,13 +215,28 @@ def process_uploads(files: list, api_key: str) -> None:
                 if ledger.is_duplicate_upload(content_hash):
                     duplicates.append(f.name)
                     continue
-                try:
-                    raw_rows = parse_file_bytes(data, f.name)
-                    transactions = [t for r in raw_rows if (t := extract(r)) is not None]
-                    all_transactions.extend(t.to_dict() for t in transactions)
-                    accepted.append((f.name, content_hash))
-                except Exception as e:
-                    errors.append(f"{f.name}: {e}")
+                to_parse.append((f.name, data, content_hash))
+
+            def _parse_one(name: str, data: bytes) -> list[dict]:
+                raw_rows = parse_file_bytes(data, name)
+                return [t.to_dict() for r in raw_rows if (t := extract(r)) is not None]
+
+            all_transactions, accepted = [], []
+            if to_parse:
+                workers = min(_MAX_PARSE_WORKERS, len(to_parse))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = [pool.submit(_parse_one, name, data) for name, data, _ in to_parse]
+                    # Iterated in submission order (not as_completed) so the
+                    # summary message lists files in the order they were
+                    # uploaded, not whichever happened to finish parsing
+                    # first — the parsing itself still runs concurrently in
+                    # the background regardless of this iteration order.
+                    for (name, _, content_hash), future in zip(to_parse, futures):
+                        try:
+                            all_transactions.extend(future.result())
+                            accepted.append((name, content_hash))
+                        except Exception as e:
+                            errors.append(f"{name}: {e}")
 
             try:
                 reconciled = reconcile(all_transactions)

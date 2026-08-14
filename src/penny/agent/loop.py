@@ -54,6 +54,27 @@ _EXPORT_INTENT_RE = re.compile(
     r"\b(export|download|spreadsheet|excel|xlsx)\b", re.IGNORECASE
 )
 
+# code-execution-2025-08-25/interleaved-thinking-2025-05-14: both current tool
+# versions (code_execution_20260521 in tools.py) are GA and no longer require
+# a beta header per Anthropic's docs — these are legacy opt-ins, kept as
+# harmless no-ops rather than removed outright, since the docs state legacy
+# code-execution beta headers "remain valid opt-ins."
+_BASE_BETAS = ["code-execution-2025-08-25", "interleaved-thinking-2025-05-14"]
+_XLSX_SKILL_BETA = "skills-2025-10-02"
+_XLSX_SKILL_CONTAINER = {"skills": [{"type": "anthropic", "skill_id": "xlsx"}]}
+
+
+def _request_extras(user_message: str) -> tuple[list[str], dict[str, Any]]:
+    """Betas and extra request kwargs for one turn's API call. Split out from
+    run_turn so the xlsx-skill attachment decision (see _EXPORT_INTENT_RE) is
+    testable on its own, without mocking a whole streaming API call."""
+    betas = list(_BASE_BETAS)
+    extra: dict[str, Any] = {}
+    if _EXPORT_INTENT_RE.search(user_message):
+        betas.append(_XLSX_SKILL_BETA)
+        extra["container"] = _XLSX_SKILL_CONTAINER
+    return betas, extra
+
 # Hard ceiling on tool-calling round trips within a single turn — a model
 # stuck in a retry loop (or one that just won't stop calling tools) should
 # fail closed instead of costing an unbounded number of API calls.
@@ -213,11 +234,7 @@ def run_turn(
     # size — but it does add real cost every round, billed as output
     # tokens, since this is a genuine tradeoff (transparency into the
     # model's reasoning vs. token cost), not a free win.
-    betas = ["code-execution-2025-08-25", "interleaved-thinking-2025-05-14"]
-    extra: dict[str, Any] = {}
-    if _EXPORT_INTENT_RE.search(user_message):
-        betas.append("skills-2025-10-02")
-        extra["container"] = {"skills": [{"type": "anthropic", "skill_id": "xlsx"}]}
+    betas, extra = _request_extras(user_message)
 
     for _round in range(_MAX_TOOL_ROUNDS):
         # .beta namespace: code_execution requires it; the xlsx skill (container.skills,

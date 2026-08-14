@@ -1,8 +1,11 @@
 [theme]
+# Light theme, but warm off-white rather than stark/bright white — easier on
+# the eyes for a chat surface someone reads for a while (same idea as
+# Claude's own light theme, or a paper/cream tone vs. a cold #FFFFFF).
 primaryColor = "#6C63FF"
-backgroundColor = "#0E1117"
-secondaryBackgroundColor = "#1E2130"
-textColor = "#FAFAFA"
+backgroundColor = "#F7F5F0"
+secondaryBackgroundColor = "#ECE8DF"
+textColor = "#2B2A28"
 font = "sans serif"
 
 [server]

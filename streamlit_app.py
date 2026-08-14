@@ -50,7 +50,7 @@ st.markdown(
 from datetime import datetime
 
 from penny.ui import chat_page, observability_page
-from penny.ui.session import delete_all_user_data, get_display_label, get_user_key
+from penny.ui.session import delete_all_user_data, get_display_label, get_user_key, reset_session
 
 _FILE_TYPES = ["pdf", "csv", "jpg", "jpeg", "png", "tiff", "tif", "bmp"]
 
@@ -88,6 +88,12 @@ with st.sidebar:
         st.caption(f"Signed in as ••••{display_label}")
 
     st.divider()
+
+    # Top-level, always visible — the single "start over" entry point (was
+    # previously a small button buried in the main header, easy to miss).
+    if st.button("➕ New chat", use_container_width=True, type="primary"):
+        reset_session(user_key)
+        st.rerun()
 
     with st.expander("🕑 Recent conversations"):
         query = st.text_input(

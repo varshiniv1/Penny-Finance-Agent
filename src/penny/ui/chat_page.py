@@ -22,7 +22,7 @@ from penny.ingest.reconcile import reconcile
 from penny.ui.session import (
     friendly_api_error, get_conversation_id, get_ledger, get_fts, get_history, get_user_key,
     list_recent_conversations, load_conversation, load_conversation_messages,
-    log_usage, persist_conversation, reset_session, search_conversations as _search_conversations,
+    log_usage, persist_conversation, search_conversations as _search_conversations,
     tx_count,
 )
 
@@ -405,11 +405,7 @@ def rename_upload(content_hash: str, new_filename: str) -> int:
 def show() -> None:
     user_key = get_user_key()
 
-    header_col, reset_col = st.columns([6, 1])
-    header_col.header("💰 Penny")
-    if st.session_state.get("display_messages") and reset_col.button("🗑️ New chat", help="Clear the conversation and loaded transactions"):
-        reset_session(user_key)
-        st.rerun()
+    st.header("💰 Penny")
 
     if "display_messages" not in st.session_state:
         st.session_state["display_messages"] = []

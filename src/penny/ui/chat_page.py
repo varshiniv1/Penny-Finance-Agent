@@ -422,6 +422,8 @@ def show() -> None:
         text_placeholder = st.empty()
         text_placeholder.caption("Thinking…")
         accumulated_text = ""
+        thinking_placeholder = None
+        accumulated_thinking = ""
         got_output = False
         thinking_cleared = False
 
@@ -480,17 +482,35 @@ def show() -> None:
                     text_placeholder.caption(_normalize_markdown(accumulated_text) + "▌")
                     got_output = True
 
-                elif event["type"] == "thinking":
-                    # Arrives as one complete block per API round (this app
-                    # doesn't use token-streaming responses), same as every
-                    # other block type here — not a partial fragment to
-                    # accumulate. Collapsed by default so genuine reasoning
-                    # is available without dominating the chat the way a
-                    # multi-paragraph thinking trace would inline.
+                elif event["type"] == "thinking_start":
+                    # Same live-typing treatment as "text" below, streamed
+                    # token-by-token — the expander stays open (expanded=True)
+                    # while reasoning is actively arriving, the same way
+                    # Claude Code shows its own thinking live rather than
+                    # only after the fact.
                     _flush_text()
-                    thinking_text = _normalize_markdown(event["text"])
-                    with st.expander("💭 Thinking", expanded=False):
-                        st.caption(thinking_text)
+                    thinking_placeholder = st.empty()
+                    accumulated_thinking = ""
+                    with thinking_placeholder:
+                        with st.expander("💭 Thinking", expanded=True):
+                            st.caption("▌")
+                    got_output = True
+
+                elif event["type"] == "thinking_delta":
+                    accumulated_thinking += event["text"]
+                    with thinking_placeholder:
+                        with st.expander("💭 Thinking", expanded=True):
+                            st.caption(_normalize_markdown(accumulated_thinking) + "▌")
+                    got_output = True
+
+                elif event["type"] == "thinking_stop":
+                    # Collapse now that reasoning is complete — available on
+                    # demand without dominating the chat the way a
+                    # multi-paragraph thinking trace would inline.
+                    thinking_text = _normalize_markdown(accumulated_thinking)
+                    with thinking_placeholder:
+                        with st.expander("💭 Thinking", expanded=False):
+                            st.caption(thinking_text)
                     _append("assistant", "thinking", content=thinking_text)
                     _new_placeholder()
                     got_output = True

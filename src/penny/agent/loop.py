@@ -163,8 +163,10 @@ def run_turn(
 ) -> Generator[dict, None, None]:
     """
     Run one conversational turn, yielding events as they happen:
-      {"type": "text",           "text": "..."}
-      {"type": "thinking",       "text": "..."}
+      {"type": "text",           "text": "..."}          (one per streamed chunk)
+      {"type": "thinking_start"}
+      {"type": "thinking_delta", "text": "..."}           (one per streamed chunk)
+      {"type": "thinking_stop"}
       {"type": "tool_call",      "name": "...", "input": {...}}
       {"type": "tool_result",    "name": "...", "result": {...}}
       {"type": "op_result",      "name": "...", "text": "..."}
@@ -205,7 +207,16 @@ def run_turn(
         # added above only when this turn looks export-related) needs the extra
         # skills-2025-10-02 beta too. Same params/behavior otherwise as
         # client.messages.create — a superset, not a different call shape.
-        response = client.beta.messages.create(
+        # Streamed (not .create()) so thinking and text render token-by-token
+        # as the model produces them, the same live-typing feel as Claude
+        # Code's own UI, instead of appearing all at once after the whole
+        # round finishes. The SDK's helper stream fires both raw SSE events
+        # and derived per-delta convenience events ("thinking"/"text") as it
+        # accumulates them — only the derived ones are needed here, since
+        # get_final_message() below hands back the exact same fully-assembled
+        # Message the old .create() call returned, so everything after this
+        # point (tool_use handling, history bookkeeping) is unchanged.
+        with client.beta.messages.stream(
             model=model,
             max_tokens=4096,
             system=_CACHED_SYSTEM,
@@ -214,7 +225,15 @@ def run_turn(
             betas=betas,
             thinking={"type": "enabled", "budget_tokens": _THINKING_BUDGET_TOKENS},
             **extra,
-        )
+        ) as stream:
+            for event in stream:
+                if event.type == "content_block_start" and event.content_block.type == "thinking":
+                    yield {"type": "thinking_start"}
+                elif event.type == "thinking":
+                    yield {"type": "thinking_delta", "text": event.thinking}
+                elif event.type == "text":
+                    yield {"type": "text", "text": event.text}
+            response = stream.get_final_message()
         yield {"type": "usage", "source": "chat_turn", "model": model, "usage": response.usage}
 
         # A single response can contain text AND multiple tool_use blocks —
@@ -225,14 +244,17 @@ def run_turn(
 
         for block in response.content:
             if block.type == "text":
-                yield {"type": "text", "text": block.text}
+                # Already streamed live above via the "text" delta events —
+                # only bookkeeping is left to do here.
                 assistant_content.append({"type": "text", "text": block.text})
 
             elif block.type == "thinking":
-                yield {"type": "thinking", "text": block.thinking}
-                # model_dump() (not a hand-built dict) so the signature field
-                # round-trips exactly as the API issued it — required for a
-                # continued conversation to remain valid.
+                # Deltas already streamed live above; this just tells the UI
+                # the block is complete (e.g. so it can stop showing a live
+                # cursor). model_dump() (not a hand-built dict) so the
+                # signature field round-trips exactly as the API issued it —
+                # required for a continued conversation to remain valid.
+                yield {"type": "thinking_stop"}
                 assistant_content.append(block.model_dump())
 
             elif block.type == "tool_use":

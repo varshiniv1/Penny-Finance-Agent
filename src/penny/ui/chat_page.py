@@ -27,10 +27,12 @@ from penny.ui.session import (
 )
 
 # Overrides Streamlit's default chat avatars (a stylized red icon for the
-# user, an orange robot for the assistant) with a plain person glyph and the
+# user, an orange robot for the assistant) with a neutral silhouette and the
 # app's own money-bag emoji — ties the assistant's identity to "💰 Penny"
-# rather than a generic bot icon.
-_USER_AVATAR = "🧑"
+# rather than a generic bot icon. A plain person emoji (🧑) was tried first,
+# but its gold/orange skin tone read as near-identical to 💰 at a glance —
+# 👤 stays visually distinct from it while still reading as "person."
+_USER_AVATAR = "👤"
 _ASSISTANT_AVATAR = "💰"
 
 _TITLE_MAX_LEN = 50

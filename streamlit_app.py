@@ -18,15 +18,15 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Streamlit's default chat text is smaller than comfortable reading size — bump
-# font-size/line-height only, leaving color/theme entirely to .streamlit/config.toml.
+# Match Claude Code's compact chat text size (14px) rather than Streamlit's
+# default — leaving color/theme entirely to .streamlit/config.toml.
 st.markdown(
     """
     <style>
     [data-testid="stChatMessageContent"] p,
     [data-testid="stChatMessageContent"] li,
     [data-testid="stChatMessageContent"] span {
-        font-size: 1.05rem;
+        font-size: 0.875rem;
         line-height: 1.6;
     }
     </style>

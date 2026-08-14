@@ -1,17 +1,19 @@
-"""Full-text search over transaction descriptions, via DuckDB's own `fts` extension.
+"""Full-text search over transaction descriptions and saved conversations, via
+DuckDB's own `fts` extension.
 
 Runs against the same connection as the Ledger (MotherDuck, or :memory: with no
 persistence configured) — search is just another DuckDB feature over the shared
-`_transactions` table, not a second storage engine. Verified working against a live
-MotherDuck connection (INSTALL fts / LOAD fts / PRAGMA create_fts_index / match_bm25
-all succeed there).
+tables, not a second storage engine. Verified working against a live MotherDuck
+connection (INSTALL fts / LOAD fts / PRAGMA create_fts_index / match_bm25 all
+succeed there).
 
 The fts index is a batch/snapshot build over the *physical*, all-users table — DuckDB's
-create_fts_index isn't incremental — so `index()` does a full rebuild rather than
-adding just the new rows. At personal scale (hundreds to low thousands of rows across
-all of Penny's users combined) that's fast enough to just do after every upload.
-User-scoping happens the same way as everywhere else in this class's queries: filtered
-by this instance's own `user_id`, never trusting the caller to add that filter.
+create_fts_index isn't incremental — so index()/index_conversations() do a full rebuild
+rather than adding just the new rows. At personal scale (hundreds to low thousands of
+rows across all of Penny's users combined) that's fast enough to just do after every
+upload or chat turn. User-scoping happens the same way as everywhere else in this
+class's queries: filtered by this instance's own `user_id`, never trusting the caller
+to add that filter.
 """
 from __future__ import annotations
 
@@ -27,6 +29,7 @@ class FTSIndex:
         self._con.execute("INSTALL fts")
         self._con.execute("LOAD fts")
         self._indexed = False
+        self._conv_indexed = False
 
     def index(self, rows: list[dict] | None = None) -> None:
         """Rebuild the full-text index over the whole _transactions table.
@@ -64,6 +67,42 @@ class FTSIndex:
             [query, self.user_id, top_k],
         ).fetchall()
         cols = ["tx_id", "description", "merchant", "category", "score"]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def index_conversations(self) -> None:
+        """Rebuild the full-text index over the whole conversation_messages
+        table — same tradeoffs as index() above, just a different table."""
+        self._con.execute(
+            "PRAGMA create_fts_index("
+            "'conversation_messages', 'id', 'content', "
+            "stopwords='none', overwrite=1)"
+        )
+        self._conv_indexed = True
+
+    def search_conversations(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
+        """Conversations with at least one matching message, best match first.
+        Scored per-message then aggregated to MAX(score) per conversation, so
+        a conversation ranks by its single best-matching turn rather than by
+        how many turns happen to mention the term."""
+        if not query.strip():
+            return []
+        if not self._conv_indexed:
+            self.index_conversations()
+        rows = self._con.execute(
+            """
+            SELECT c.conversation_id, c.title, c.updated_at,
+                   MAX(fts_main_conversation_messages.match_bm25(cm.id, ?)) AS score
+            FROM conversation_messages cm
+            JOIN conversations c ON c.conversation_id = cm.conversation_id
+            WHERE cm.user_id = ?
+            GROUP BY c.conversation_id, c.title, c.updated_at
+            HAVING score IS NOT NULL
+            ORDER BY score DESC
+            LIMIT ?
+            """,
+            [query, self.user_id, top_k],
+        ).fetchall()
+        cols = ["conversation_id", "title", "updated_at", "score"]
         return [dict(zip(cols, r)) for r in rows]
 
     def close(self) -> None:

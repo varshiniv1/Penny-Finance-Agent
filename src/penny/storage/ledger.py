@@ -16,7 +16,10 @@ and aggregates (SUM, COUNT, ...) over it are correctly pre-filtered.
 """
 from __future__ import annotations
 
+import json
 import re
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +101,36 @@ CREATE TABLE IF NOT EXISTS usage_log (
     output_tokens               INTEGER,
     cache_creation_input_tokens INTEGER,
     cache_read_input_tokens     INTEGER
+);
+
+-- One row per saved conversation. `history` is the full Anthropic-format
+-- message list (JSON) exactly as passed to client.beta.messages.create — the
+-- same shape already kept in st.session_state["history"] during a live
+-- session, just made durable — so reopening a conversation can genuinely
+-- continue it, not just display a read-only transcript.
+CREATE TABLE IF NOT EXISTS conversations (
+    conversation_id VARCHAR NOT NULL,
+    user_id         VARCHAR NOT NULL,
+    title           VARCHAR,
+    history         VARCHAR,
+    created_at      VARCHAR NOT NULL,
+    updated_at      VARCHAR NOT NULL,
+    PRIMARY KEY (conversation_id)
+);
+
+-- One row per human-readable chat turn (text/op/note/thinking only — never
+-- chart/image/file bytes, which stay out of this table entirely). Exists
+-- purely to power full-text search and the "recent conversations" list;
+-- the actual resumable state lives in conversations.history above.
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    id              VARCHAR NOT NULL,
+    conversation_id VARCHAR NOT NULL,
+    user_id         VARCHAR NOT NULL,
+    role            VARCHAR NOT NULL,
+    type            VARCHAR NOT NULL,
+    content         VARCHAR,
+    created_at      VARCHAR NOT NULL,
+    PRIMARY KEY (id)
 );
 """
 
@@ -384,15 +417,93 @@ class Ledger:
                 "cache_creation_input_tokens", "cache_read_input_tokens"]
         return [dict(zip(cols, r)) for r in rows]
 
+    # ── conversations (persisted chat history) ──────────────────────────────────
+
+    def save_conversation(self, conversation_id: str, title: str, history: list[dict]) -> None:
+        """Upsert this conversation's resumable state. `ON CONFLICT ... DO
+        UPDATE` (rather than INSERT OR REPLACE) so created_at is set once on
+        first save and never overwritten on later turns."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._con.execute(
+            """
+            INSERT INTO conversations (conversation_id, user_id, title, history, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (conversation_id) DO UPDATE SET
+                title = excluded.title,
+                history = excluded.history,
+                updated_at = excluded.updated_at
+            """,
+            [conversation_id, self.user_id, title, json.dumps(history, default=str), now, now],
+        )
+
+    def add_conversation_messages(self, conversation_id: str, entries: list[dict]) -> None:
+        """Append the display-message entries new since the last save — each
+        with role/type/content already in the shape chat_page._render_message
+        expects, so a reopened conversation renders identically to how it
+        first appeared."""
+        if not entries:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        self._con.executemany(
+            """
+            INSERT INTO conversation_messages (id, conversation_id, user_id, role, type, content, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (str(uuid.uuid4()), conversation_id, self.user_id, e["role"], e["type"], e["content"], now)
+                for e in entries
+            ],
+        )
+
+    def recent_conversations(self, limit: int = 5) -> list[dict]:
+        """Most recently active conversations, most recent first — powers the
+        sidebar's "Recent conversations" list."""
+        rows = self._con.execute(
+            """
+            SELECT conversation_id, title, updated_at
+            FROM conversations WHERE user_id = ?
+            ORDER BY updated_at DESC LIMIT ?
+            """,
+            [self.user_id, limit],
+        ).fetchall()
+        cols = ["conversation_id", "title", "updated_at"]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def load_conversation(self, conversation_id: str) -> dict | None:
+        """The resumable API-format history for one conversation, or None if
+        it doesn't exist (or belongs to a different user)."""
+        row = self._con.execute(
+            "SELECT title, history FROM conversations WHERE user_id = ? AND conversation_id = ?",
+            [self.user_id, conversation_id],
+        ).fetchone()
+        if row is None:
+            return None
+        return {"title": row[0], "history": json.loads(row[1]) if row[1] else []}
+
+    def load_conversation_messages(self, conversation_id: str) -> list[dict]:
+        """The rendered transcript for one conversation, oldest first — what
+        chat_page.show() replays into display_messages on reopen."""
+        rows = self._con.execute(
+            """
+            SELECT role, type, content FROM conversation_messages
+            WHERE user_id = ? AND conversation_id = ? ORDER BY created_at
+            """,
+            [self.user_id, conversation_id],
+        ).fetchall()
+        cols = ["role", "type", "content"]
+        return [dict(zip(cols, r)) for r in rows]
+
     # ── data deletion ────────────────────────────────────────────────────────
 
     def delete_all_user_data(self) -> None:
         """Wipe every row belonging to this user_id — transactions, upload
-        history, and usage log. Does not touch merchant_cache (global, not
-        personal data) or any other user's rows."""
+        history, usage log, and saved conversations. Does not touch
+        merchant_cache (global, not personal data) or any other user's rows."""
         self._con.execute("DELETE FROM _transactions WHERE user_id = ?", [self.user_id])
         self._con.execute("DELETE FROM uploaded_statements WHERE user_id = ?", [self.user_id])
         self._con.execute("DELETE FROM usage_log WHERE user_id = ?", [self.user_id])
+        self._con.execute("DELETE FROM conversations WHERE user_id = ?", [self.user_id])
+        self._con.execute("DELETE FROM conversation_messages WHERE user_id = ?", [self.user_id])
 
     def close(self) -> None:
         self._con.close()

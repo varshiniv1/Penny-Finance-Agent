@@ -85,6 +85,43 @@ def get_history() -> list[dict]:
     return st.session_state["history"]
 
 
+def get_conversation_id() -> str:
+    """The active conversation's storage key — created lazily on the first
+    turn that actually completes (see persist_conversation's call site in
+    chat_page.show()), not on every page load."""
+    if "conversation_id" not in st.session_state:
+        st.session_state["conversation_id"] = uuid.uuid4().hex
+    return st.session_state["conversation_id"]
+
+
+def persist_conversation(
+    user_key: str, conversation_id: str, title: str, history: list[dict], new_messages: list[dict]
+) -> None:
+    """Save this turn's resumable state (history) and any display messages
+    new since the last save, then refresh the search index so the turn is
+    immediately findable."""
+    ledger = get_ledger(user_key)
+    ledger.save_conversation(conversation_id, title, history)
+    ledger.add_conversation_messages(conversation_id, new_messages)
+    get_fts(user_key).index_conversations()
+
+
+def list_recent_conversations(user_key: str, limit: int = 5) -> list[dict]:
+    return get_ledger(user_key).recent_conversations(limit)
+
+
+def search_conversations(user_key: str, query: str) -> list[dict]:
+    return get_fts(user_key).search_conversations(query)
+
+
+def load_conversation(user_key: str, conversation_id: str) -> dict | None:
+    return get_ledger(user_key).load_conversation(conversation_id)
+
+
+def load_conversation_messages(user_key: str, conversation_id: str) -> list[dict]:
+    return get_ledger(user_key).load_conversation_messages(conversation_id)
+
+
 def tx_count(user_key: str) -> int:
     return get_ledger(user_key).count()
 
@@ -114,8 +151,13 @@ def get_usage_log(user_key: str) -> list[dict]:
 
 def reset_session(user_key: str) -> None:
     """Clear the conversation, ledger, and search index for this user — start
-    over without a full browser refresh (which would also lose the API key)."""
-    for key in (f"ledger_{user_key}", f"fts_{user_key}", "history", "display_messages"):
+    over without a full browser refresh (which would also lose the API key).
+    Also drops conversation_id, so the next completed turn starts a new saved
+    conversation rather than continuing to append to the old one."""
+    for key in (
+        f"ledger_{user_key}", f"fts_{user_key}", "history", "display_messages",
+        "conversation_id", "_persisted_msg_count",
+    ):
         st.session_state.pop(key, None)
 
 

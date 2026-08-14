@@ -11,14 +11,23 @@ import streamlit as st
 
 from penny.agent.insights import insight
 from penny.agent.loop import run_turn
+from penny.config import DEFAULT_MODEL
 from penny.ingest.enrich import enrich_batch
 from penny.ingest.extractor import extract
 from penny.ingest.parser import parse_file_bytes
 from penny.ingest.reconcile import reconcile
 from penny.ui.session import (
-    friendly_api_error, get_ledger, get_fts, get_history, get_user_key,
-    log_usage, reset_session, tx_count,
+    friendly_api_error, get_conversation_id, get_ledger, get_fts, get_history, get_user_key,
+    list_recent_conversations, load_conversation, load_conversation_messages,
+    log_usage, persist_conversation, reset_session, search_conversations as _search_conversations,
+    tx_count,
 )
+
+_TITLE_MAX_LEN = 50
+# Types that make it into the persisted transcript / search index — never
+# chart/image/file, whose "content" is binary or a large JSON chart spec, not
+# something worth storing per-turn or searching by text.
+_PERSISTABLE_TYPES = ("text", "op", "note", "thinking")
 
 _FILE_TYPES = ["pdf", "csv", "jpg", "jpeg", "png", "tiff", "tif", "bmp"]
 _MAX_FILE_MB = 20
@@ -262,7 +271,7 @@ def process_uploads(files: list, api_key: str) -> None:
             if api_key and reconciled:
                 try:
                     stats = enrich_batch(ledger, api_key)
-                    log_usage("enrichment", "claude-haiku-4-5-20251001", stats.get("usage"), user_key)
+                    log_usage("enrichment", DEFAULT_MODEL, stats.get("usage"), user_key)
                     enrich_note = (
                         f" Categorized {stats['rules'] + stats['web']} merchants"
                         + (f", {stats['ambiguous']} left uncategorized." if stats["ambiguous"] else ".")
@@ -276,7 +285,7 @@ def process_uploads(files: list, api_key: str) -> None:
                     result = insight(ledger, api_key)
                     if result:
                         insight_text, usage = result
-                        log_usage("upload_insight", "claude-haiku-4-5-20251001", usage, user_key)
+                        log_usage("upload_insight", DEFAULT_MODEL, usage, user_key)
                 except Exception:
                     pass
 
@@ -299,6 +308,45 @@ def process_uploads(files: list, api_key: str) -> None:
         summary = _normalize_markdown(summary)
         st.markdown(summary)
         _append("assistant", "text", content=summary)
+
+
+def _conversation_title(display_messages: list[dict]) -> str:
+    """First user message, truncated — same idea as how chat UIs (including
+    Claude Code) label a saved session, so the recent-conversations list is
+    scannable without opening each one."""
+    for m in display_messages:
+        if m["role"] == "user" and m["type"] == "text":
+            text = m["content"].strip()
+            return text[:_TITLE_MAX_LEN] + "…" if len(text) > _TITLE_MAX_LEN else text
+    return "New conversation"
+
+
+def recent_conversations() -> list[dict]:
+    """Top 5 (by default) most recently active saved conversations for the
+    sidebar's "Recent conversations" list."""
+    return list_recent_conversations(get_user_key())
+
+
+def search_conversations(query: str) -> list[dict]:
+    """Conversations with a message matching `query`, best match first."""
+    return _search_conversations(get_user_key(), query)
+
+
+def open_conversation(conversation_id: str) -> None:
+    """Load a saved conversation back into the active session — both the
+    resumable API-format history (so chatting can continue exactly where it
+    left off) and the rendered transcript (so it looks the same as it did
+    originally). No-ops if the conversation doesn't exist or belongs to a
+    different user."""
+    user_key = get_user_key()
+    saved = load_conversation(user_key, conversation_id)
+    if saved is None:
+        return
+    display_msgs = load_conversation_messages(user_key, conversation_id)
+    st.session_state["history"] = saved["history"]
+    st.session_state["display_messages"] = display_msgs
+    st.session_state["conversation_id"] = conversation_id
+    st.session_state["_persisted_msg_count"] = len(display_msgs)
 
 
 def list_uploads() -> list[dict]:
@@ -524,3 +572,15 @@ def show() -> None:
 
     # Keep history for next turn (already updated by run_turn)
     st.session_state["history"] = history
+
+    # Persist this turn — the resumable history plus any display messages new
+    # since the last save — so it survives a refresh and shows up in "Recent
+    # conversations"/search. The user's own message guarantees at least one
+    # new persistable entry, so this always has something to save here.
+    display_msgs = st.session_state["display_messages"]
+    already_persisted = st.session_state.get("_persisted_msg_count", 0)
+    new_msgs = [m for m in display_msgs[already_persisted:] if m["type"] in _PERSISTABLE_TYPES]
+    persist_conversation(
+        user_key, get_conversation_id(), _conversation_title(display_msgs), history, new_msgs
+    )
+    st.session_state["_persisted_msg_count"] = len(display_msgs)

@@ -34,10 +34,21 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+from datetime import datetime
+
 from penny.ui import chat_page, observability_page
 from penny.ui.session import delete_all_user_data, get_display_label, get_user_key
 
 _FILE_TYPES = ["pdf", "csv", "jpg", "jpeg", "png", "tiff", "tif", "bmp"]
+
+
+def _format_timestamp(iso_str: str) -> str:
+    """updated_at (a UTC ISO-8601 string, see Ledger.save_conversation) as a
+    short local-agnostic label for the recent-conversations list."""
+    try:
+        return datetime.fromisoformat(iso_str).strftime("%b %d, %I:%M %p")
+    except (TypeError, ValueError):
+        return ""
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -64,6 +75,23 @@ with st.sidebar:
         st.caption(f"Signed in as ••••{display_label}")
 
     st.divider()
+
+    with st.expander("🕑 Recent conversations"):
+        query = st.text_input(
+            "Search your conversations",
+            key="conv_search",
+            label_visibility="collapsed",
+            placeholder="🔍 Search your conversations…",
+        )
+        conversations = chat_page.search_conversations(query) if query else chat_page.recent_conversations()
+        if not conversations:
+            st.caption("No matches." if query else "No saved conversations yet.")
+        for c in conversations:
+            label = c["title"] or "Untitled"
+            if st.button(label, key=f"open_conv_{c['conversation_id']}", use_container_width=True):
+                chat_page.open_conversation(c["conversation_id"])
+                st.rerun()
+            st.caption(_format_timestamp(c["updated_at"]))
 
     with st.expander("📎 Upload statements"):
         st.caption("Supports PDF (text or scanned), CSV, and image statements.")

@@ -20,6 +20,12 @@ st.set_page_config(
 
 # Match Claude Code's compact chat text size (14px) rather than Streamlit's
 # default — leaving color/theme entirely to .streamlit/config.toml.
+#
+# Inline code (the `tool_name` backticks in operation labels, e.g. "`query_sql`
+# — Queried your transactions") also gets its own color here — Streamlit's
+# default inline-code green clashes with the warm cream theme. A muted violet
+# chip instead, tying it to the app's own primaryColor rather than an
+# arbitrary syntax-highlighting color.
 st.markdown(
     """
     <style>
@@ -28,6 +34,13 @@ st.markdown(
     [data-testid="stChatMessageContent"] span {
         font-size: 0.875rem;
         line-height: 1.6;
+    }
+    [data-testid="stChatMessageContent"] code {
+        color: #5A50E0;
+        background-color: rgba(108, 99, 255, 0.12);
+        padding: 0.08em 0.4em;
+        border-radius: 4px;
+        font-weight: 500;
     }
     </style>
     """,

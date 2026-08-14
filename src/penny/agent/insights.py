@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from typing import Any, TYPE_CHECKING
 
+from penny.config import DEFAULT_MODEL
+
 if TYPE_CHECKING:
     from penny.storage.ledger import Ledger
 
@@ -34,7 +36,7 @@ _TOP_MERCHANTS_SQL = (
 )
 
 
-def insight(ledger: "Ledger", api_key: str) -> tuple[str, Any] | None:
+def insight(ledger: "Ledger", api_key: str, model: str = DEFAULT_MODEL) -> tuple[str, Any] | None:
     """Return (insight_text, usage), or None if there's nothing to summarize."""
     import anthropic
 
@@ -57,7 +59,7 @@ def insight(ledger: "Ledger", api_key: str) -> tuple[str, Any] | None:
 
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=model,
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}],
     )

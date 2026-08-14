@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from penny.config import DEFAULT_MODEL
+
 _CATEGORIES = (
     "Dining, Shopping, Groceries, Transport, Health, Subscriptions, "
     "Utilities, Entertainment, Travel, Income, Transfer, Cash, Other"
@@ -25,7 +27,9 @@ _SUBAGENT_SYSTEM_PROMPT = (
 _LINE_RE = re.compile(r"^(merchant|category):\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 
 
-def categorize_merchant(descriptor: str, api_key: str) -> tuple[dict, Any] | None:
+def categorize_merchant(
+    descriptor: str, api_key: str, model: str = DEFAULT_MODEL
+) -> tuple[dict, Any] | None:
     """Delegate classification of one transaction descriptor to a sub-agent.
 
     Returns ({"merchant": ..., "category": ...}, usage), or None if the
@@ -35,7 +39,7 @@ def categorize_merchant(descriptor: str, api_key: str) -> tuple[dict, Any] | Non
 
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=model,
         # Room for a web_search tool round (query + results) before the final
         # two-line answer — 128 was tight enough to truncate before the
         # Merchant/Category lines ever got emitted.

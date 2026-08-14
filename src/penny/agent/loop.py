@@ -11,6 +11,7 @@ import anthropic
 
 from penny.agent.prompts import SYSTEM_PROMPT
 from penny.agent.tools import TOOL_SCHEMAS, ToolExecutor
+from penny.config import DEFAULT_MODEL
 
 if TYPE_CHECKING:
     from penny.storage.ledger import Ledger
@@ -158,7 +159,7 @@ def run_turn(
     ledger: "Ledger",
     fts: "FTSIndex",
     api_key: str,
-    model: str = "claude-haiku-4-5-20251001",
+    model: str = DEFAULT_MODEL,
 ) -> Generator[dict, None, None]:
     """
     Run one conversational turn, yielding events as they happen:
@@ -305,7 +306,7 @@ def run_turn(
                     yield {
                         "type": "usage",
                         "source": "chat_subagent_categorize",
-                        "model": "claude-haiku-4-5-20251001",
+                        "model": DEFAULT_MODEL,
                         "usage": executor.last_subagent_usage,
                     }
                     executor.last_subagent_usage = None

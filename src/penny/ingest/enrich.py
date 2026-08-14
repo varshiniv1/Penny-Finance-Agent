@@ -4,6 +4,8 @@ from __future__ import annotations
 import re
 from typing import Any, TYPE_CHECKING
 
+from penny.config import DEFAULT_MODEL
+
 if TYPE_CHECKING:
     from penny.storage.ledger import Ledger
 
@@ -62,7 +64,9 @@ def apply_rules(descriptor: str) -> tuple[str | None, str | None]:
 
 # ── Batch web-search enrichment ───────────────────────────────────────────────
 
-def enrich_batch(ledger: "Ledger", api_key: str, max_batch: int = 50) -> dict:
+def enrich_batch(
+    ledger: "Ledger", api_key: str, max_batch: int = 50, model: str = DEFAULT_MODEL
+) -> dict:
     """
     For each uncached descriptor:
       1. Try rule-based first.
@@ -93,7 +97,7 @@ def enrich_batch(ledger: "Ledger", api_key: str, max_batch: int = 50) -> dict:
         client = anthropic.Anthropic(api_key=api_key)
         for start in range(0, len(remaining), max_batch):
             batch = remaining[start : start + max_batch]
-            results, usage = _batch_lookup(client, batch)
+            results, usage = _batch_lookup(client, batch, model)
             if usage is not None:
                 total_usage = _add_usage(total_usage, usage)
             for d in batch:
@@ -136,7 +140,9 @@ _CATEGORIES = (
 _BATCH_LINE_RE = re.compile(r"^\s*(\d+)\.\s*Merchant:\s*(.+?)\s*\|\s*Category:\s*(.+?)\s*$", re.IGNORECASE)
 
 
-def _batch_lookup(client, descriptors: list[str]) -> tuple[dict[str, dict], Any]:
+def _batch_lookup(
+    client, descriptors: list[str], model: str = DEFAULT_MODEL
+) -> tuple[dict[str, dict], Any]:
     """Ask Claude to identify merchant + category for all descriptors in one request.
 
     Returns (results_by_descriptor, usage) — usage is None if the call failed.
@@ -151,7 +157,7 @@ def _batch_lookup(client, descriptors: list[str]) -> tuple[dict[str, dict], Any]
     )
     try:
         resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=model,
             max_tokens=min(4096, 60 * len(descriptors) + 256),
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": prompt}],

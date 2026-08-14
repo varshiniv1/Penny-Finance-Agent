@@ -15,7 +15,12 @@ st.set_page_config(
     page_title="Penny — Personal Finance Agent",
     page_icon="💰",
     layout="wide",
-    initial_sidebar_state="expanded",
+    # "expanded" forced the sidebar open at every viewport width, including
+    # phones — on a ~375px-wide screen that leaves the chat itself a ~75px
+    # sliver instead of a real overlay drawer. "auto" lets Streamlit decide
+    # per viewport: expanded on desktop/tablet, collapsed-behind-a-toggle on
+    # phones, same responsive behavior Streamlit already ships for this.
+    initial_sidebar_state="auto",
 )
 
 # Match Claude Code's compact chat text size (14px) rather than Streamlit's
@@ -41,6 +46,24 @@ st.markdown(
         padding: 0.08em 0.4em;
         border-radius: 4px;
         font-weight: 500;
+    }
+
+    /* On a phone-width viewport, Streamlit's sidebar is still an in-flow
+       flex column (position: relative) even when open — it doesn't switch
+       to an overlay drawer on its own, so opening it squeezes the chat into
+       a ~75px sliver next to it. Force it into a real overlay here instead:
+       fixed position, floating above the content with a shadow, so the chat
+       underneath keeps its full width regardless of sidebar state. */
+    @media (max-width: 640px) {
+        [data-testid="stSidebar"] {
+            position: fixed !important;
+            top: 0;
+            left: 0;
+            height: 100vh !important;
+            width: min(85vw, 320px) !important;
+            box-shadow: 2px 0 16px rgba(0, 0, 0, 0.18);
+            z-index: 999995;
+        }
     }
     </style>
     """,

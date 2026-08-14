@@ -26,6 +26,13 @@ from penny.ui.session import (
     tx_count,
 )
 
+# Overrides Streamlit's default chat avatars (a stylized red icon for the
+# user, an orange robot for the assistant) with a plain person glyph and the
+# app's own money-bag emoji — ties the assistant's identity to "💰 Penny"
+# rather than a generic bot icon.
+_USER_AVATAR = "🧑"
+_ASSISTANT_AVATAR = "💰"
+
 _TITLE_MAX_LEN = 50
 # Types that make it into the persisted transcript / search index — never
 # chart/image/file, whose "content" is binary or a large JSON chart spec, not
@@ -220,7 +227,7 @@ def process_uploads(files: list, api_key: str) -> None:
     assistant. Called from the sidebar's "Upload statements" expander in
     streamlit_app.py — uploading lives outside the chat input itself now."""
     user_key = get_user_key()
-    with st.chat_message("assistant"):
+    with st.chat_message("assistant", avatar=_ASSISTANT_AVATAR):
         try:
             ledger = get_ledger(user_key)
             fts = get_fts(user_key)
@@ -408,7 +415,8 @@ def show() -> None:
     api_key = st.session_state.get("api_key", "")
 
     for i, msg in enumerate(st.session_state["display_messages"]):
-        with st.chat_message(msg["role"]):
+        avatar = _USER_AVATAR if msg["role"] == "user" else _ASSISTANT_AVATAR
+        with st.chat_message(msg["role"], avatar=avatar):
             _render_message(msg, key=f"history_dl_{i}")
 
     text = st.chat_input("Ask about your spending…")
@@ -422,16 +430,16 @@ def show() -> None:
 
     label = _normalize_markdown(text)
     _append("user", "text", content=label)
-    with st.chat_message("user"):
+    with st.chat_message("user", avatar=_USER_AVATAR):
         st.markdown(label)
 
     if not api_key:
-        with st.chat_message("assistant"):
+        with st.chat_message("assistant", avatar=_ASSISTANT_AVATAR):
             st.error("Add your Anthropic API key in the sidebar to chat.")
         return
 
     if tx_count(user_key) == 0:
-        with st.chat_message("assistant"):
+        with st.chat_message("assistant", avatar=_ASSISTANT_AVATAR):
             st.warning("Attach a statement first (📎 Upload statements in the sidebar) so I have something to answer questions about.")
         return
 
@@ -439,7 +447,7 @@ def show() -> None:
     ledger = get_ledger(user_key)
     fts = get_fts(user_key)
 
-    with st.chat_message("assistant"):
+    with st.chat_message("assistant", avatar=_ASSISTANT_AVATAR):
         text_placeholder = st.empty()
         text_placeholder.caption("Thinking…")
         accumulated_text = ""

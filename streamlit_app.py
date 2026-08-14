@@ -91,7 +91,10 @@ with st.sidebar:
 
     # Top-level, always visible — the single "start over" entry point (was
     # previously a small button buried in the main header, easy to miss).
-    if st.button("➕ New chat", use_container_width=True, type="primary"):
+    # Plain (not type="primary") to match the muted cream/bordered look of
+    # the expanders below it, rather than standing out as a bold solid-violet
+    # block against the rest of the sidebar.
+    if st.button("➕ New chat", use_container_width=True):
         reset_session(user_key)
         st.rerun()
 

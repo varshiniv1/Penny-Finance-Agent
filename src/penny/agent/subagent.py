@@ -13,8 +13,8 @@ from typing import Any
 from penny.config import DEFAULT_MODEL
 
 _CATEGORIES = (
-    "Dining, Shopping, Groceries, Transport, Health, Subscriptions, "
-    "Utilities, Entertainment, Travel, Income, Transfer, Cash, Other"
+    "Dining, Shopping, Groceries, Transport, Health, Insurance, Subscriptions, "
+    "Utilities, Entertainment, Travel, Income, Transfer, Cash, Taxes & Government, Other"
 )
 _SUBAGENT_SYSTEM_PROMPT = (
     "You are a merchant-classification specialist sub-agent. You receive a single "

@@ -53,8 +53,23 @@ st.markdown(
        to an overlay drawer on its own, so opening it squeezes the chat into
        a ~75px sliver next to it. Force it into a real overlay here instead:
        fixed position, floating above the content with a shadow, so the chat
-       underneath keeps its full width regardless of sidebar state. */
-    @media (max-width: 640px) {
+       underneath keeps its full width regardless of sidebar state.
+
+       max-width: 767.98px matches claude.com's own phone/tablet breakpoint —
+       inspected directly from their live site's stylesheets (by far their
+       most common media-query value, and where their own nav collapses to a
+       hamburger, confirmed by resizing 767px vs. 768px against it) — rather
+       than an arbitrary cutoff of our own. 768px+ (our own tablet preset is
+       exactly 768px) already renders the in-flow sidebar with plenty of
+       room, so it correctly falls outside this rule.
+
+       .98px, not a flat 767px: verified empirically that some viewports
+       report window.innerWidth as an integer (767) while the actual
+       sub-pixel value used for media-query matching sits fractionally above
+       it — matchMedia('(max-width: 767px)') came back false at exactly
+       767px width. Bootstrap's own breakpoints use the identical .98px
+       offset for this same reason. */
+    @media (max-width: 767.98px) {
         [data-testid="stSidebar"] {
             position: fixed !important;
             top: 0;

@@ -12,7 +12,7 @@ transactions (
 )
 ```
 
-Common categories: Dining, Shopping, Groceries, Transport, Health, Insurance, Subscriptions, Utilities, Entertainment, Travel, Income, Transfer, Cash, Taxes & Government, Other.
+Common categories: Dining, Shopping, Groceries, Transport, Health, Insurance, Housing, Subscriptions, Utilities, Entertainment, Travel, Income, Transfer, Cash, Taxes & Government, Other.
 
 ## Tool-use rules (MANDATORY)
 

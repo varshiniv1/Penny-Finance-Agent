@@ -21,6 +21,7 @@ _RULES: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"MINT\s*MOBILE", re.I),           "Mint Mobile",      "Utilities"),
     (re.compile(r"PLAYSTATION",  re.I),            "PlayStation Network", "Entertainment"),
     (re.compile(r"GEICO",        re.I),            "Geico",            "Insurance"),
+    (re.compile(r"PAYLEASE",     re.I),            "PayLease",         "Housing"),
     (re.compile(r"^SQ\s*\*",     re.I),            None,               "Dining"),   # merchant kept as-is after SQ *
     (re.compile(r"^TST\*",       re.I),            None,               "Dining"),
     (re.compile(r"^SP\s*\*",     re.I),            None,               "Shopping"),
@@ -134,7 +135,7 @@ def _add_usage(total, usage):
 
 
 _CATEGORIES = (
-    "Dining, Shopping, Groceries, Transport, Health, Insurance, Subscriptions, "
+    "Dining, Shopping, Groceries, Transport, Health, Insurance, Housing, Subscriptions, "
     "Utilities, Entertainment, Travel, Income, Transfer, Cash, Taxes & Government, Other"
 )
 _BATCH_LINE_RE = re.compile(r"^\s*(\d+)\.\s*Merchant:\s*(.+?)\s*\|\s*Category:\s*(.+?)\s*$", re.IGNORECASE)

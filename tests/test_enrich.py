@@ -42,6 +42,16 @@ def test_apply_rules_matches_known_merchant():
     assert apply_rules("STARBUCKS #1234") == ("Starbucks", "Dining")
 
 
+def test_apply_rules_geico_is_insurance_not_other():
+    # Regression check: Geico used to be hardcoded to "Other" because the
+    # taxonomy had no Insurance bucket — never even reached the LLM.
+    assert apply_rules("RECURRING CARD PURCHASE GEICO *AUTO") == ("Geico", "Insurance")
+
+
+def test_apply_rules_paylease_is_housing():
+    assert apply_rules("PL*PAYLEASE WEB PMTS DFN9C8") == ("PayLease", "Housing")
+
+
 def test_apply_rules_no_match_returns_none_none():
     assert apply_rules("SOME UNKNOWN VENDOR XYZ") == (None, None)
 

@@ -138,6 +138,15 @@ _CATEGORIES = (
     "Utilities, Entertainment, Travel, Income, Transfer, Cash, Other"
 )
 _BATCH_LINE_RE = re.compile(r"^\s*(\d+)\.\s*Merchant:\s*(.+?)\s*\|\s*Category:\s*(.+?)\s*$", re.IGNORECASE)
+# The prompt asks for a plain "Merchant: X | Category: Y" line, but the model
+# sometimes wraps a field in markdown emphasis anyway (caught a real
+# "**Entertainment**" leaking into merchant_cache this way) — strip it rather
+# than store it verbatim.
+_MARKDOWN_EMPHASIS_RE = re.compile(r"^[*_`]+|[*_`]+$")
+
+
+def _strip_markdown(text: str) -> str:
+    return _MARKDOWN_EMPHASIS_RE.sub("", text)
 
 
 def _batch_lookup(
@@ -171,7 +180,9 @@ def _batch_lookup(
         m = _BATCH_LINE_RE.match(line)
         if m:
             idx, merchant, category = m.groups()
-            by_index[int(idx)] = {"merchant": merchant, "category": category}
+            by_index[int(idx)] = {
+                "merchant": _strip_markdown(merchant), "category": _strip_markdown(category)
+            }
 
     results = {
         descriptor: by_index[i]

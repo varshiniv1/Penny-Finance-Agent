@@ -25,6 +25,15 @@ _SUBAGENT_SYSTEM_PROMPT = (
     f"Category: <one of: {_CATEGORIES}>"
 )
 _LINE_RE = re.compile(r"^(merchant|category):\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+# The prompt asks for a plain "Merchant: X" / "Category: Y" reply, but the
+# model sometimes wraps a field in markdown emphasis anyway (caught a real
+# "**Entertainment**" leaking into merchant_cache this way) — strip it rather
+# than store it verbatim.
+_MARKDOWN_EMPHASIS_RE = re.compile(r"^[*_`]+|[*_`]+$")
+
+
+def _strip_markdown(text: str) -> str:
+    return _MARKDOWN_EMPHASIS_RE.sub("", text)
 
 
 def categorize_merchant(
@@ -50,7 +59,7 @@ def categorize_merchant(
     )
     text = "".join(block.text for block in resp.content if hasattr(block, "text"))
 
-    fields = {m.group(1).lower(): m.group(2) for m in _LINE_RE.finditer(text)}
+    fields = {m.group(1).lower(): _strip_markdown(m.group(2)) for m in _LINE_RE.finditer(text)}
     merchant, category = fields.get("merchant"), fields.get("category")
     if not merchant or not category:
         return None
